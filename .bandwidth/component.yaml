@@ -1,0 +1,17 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  schemaVersion: v1.0.0
+  name: javascript-brtc-sdk
+  description: Javascript SDK for Bandwidth RTC
+  annotations:
+    github.com/project-slug: Bandwidth/javascript-brtc-sdk
+  organization: BW
+  costCenter: 
+  platformType: 
+  buildPlatform: N/A
+spec:
+  type: Library
+  owner: github/band-programmable-voice
+  lifecycle: Prototype
+  
