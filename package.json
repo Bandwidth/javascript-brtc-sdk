@@ -14,14 +14,21 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Bandwidth/brtc-node-sdk.git"
+    "url": "https://github.com/Bandwidth/javascript-brtc-sdk"
   },
-  "author": "edge-services@bandwidth.com",
+  "author": "bandwidth",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/Bandwidth/brtc-node-sdk/issues"
+    "url": "https://github.com/Bandwidth/javascript-brtc-sdk/issues"
   },
-  "homepage": "https://github.com/Bandwidth/brtc-node-sdk#readme",
+  "homepage": "https://github.com/Bandwidth/javascript-brtc-sdk",
+  "keywords": [
+    "bandwidth",
+    "programmable voice",
+    "pv",
+    "webrtc",
+    "brtc"
+  ],
   "devDependencies": {
     "@babel/core": "^7.28.4",
     "@babel/plugin-proposal-class-properties": "^7.8.3",
