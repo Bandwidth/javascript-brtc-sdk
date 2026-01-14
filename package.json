@@ -48,5 +48,8 @@
     "rpc-websockets": "7.10.0",
     "uuid": "^13.0.0",
     "webrtc-adapter": "^9.0.3"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
