@@ -1,0 +1,52 @@
+{
+  "name": "bandwidth-rtc",
+  "version": "0.0.1",
+  "description": "SDK for BandwidthRTC Node Applications",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "rm -rf ./dist/* && prettier --check  . && tsc && webpack --config webpack.prod.js",
+    "build:dev": "rm -rf ./dist/* && prettier --check  . && tsc && webpack --config webpack.dev.js",
+    "test": "prettier --check . && jest src --coverage",
+    "test:debug": "prettier --check . && node --inspect jest --runInBand --coverage src",
+    "preversion": "npm test",
+    "version": "npm run build",
+    "prepare": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Bandwidth/brtc-node-sdk.git"
+  },
+  "author": "edge-services@bandwidth.com",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Bandwidth/brtc-node-sdk/issues"
+  },
+  "homepage": "https://github.com/Bandwidth/brtc-node-sdk#readme",
+  "devDependencies": {
+    "@babel/core": "^7.28.4",
+    "@babel/plugin-proposal-class-properties": "^7.8.3",
+    "@babel/preset-env": "^7.28.3",
+    "@babel/preset-typescript": "^7.27.1",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^24.7.0",
+    "babel-jest": "^30.2.0",
+    "jest": "^30.2.0",
+    "jest-environment-jsdom": "^30.2.0",
+    "prettier": "^3.6.2",
+    "ts-loader": "^9.5.4",
+    "ts-node": "^10.9.2",
+    "typedoc": "^0.28.13",
+    "typescript": "^5.9.3",
+    "webpack": "^5.102.1",
+    "webpack-cli": "^6.0.1",
+    "webpack-merge": "^6.0.1"
+  },
+  "dependencies": {
+    "@types/uuid": "^10.0.0",
+    "async-mutex": "^0.5.0",
+    "jwt-decode": "^4.0.0",
+    "rpc-websockets": "7.10.0",
+    "uuid": "^13.0.0",
+    "webrtc-adapter": "^9.0.3"
+  }
+}
