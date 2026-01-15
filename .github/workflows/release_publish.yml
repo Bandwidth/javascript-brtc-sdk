@@ -1,0 +1,33 @@
+name: Publish Release
+
+on:
+  release:
+    types:
+      - published
+
+jobs:
+  publish-npm:
+    # Only run if release is a prod release
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v1
+      - name: Install Node.js
+        uses: actions/setup-node@v1
+        with:
+          node-version: '24'
+      - name: npm install
+        run: npm install
+      - name: npm version and publish
+        run: |
+          npm version ${{ github.event.release.tag_name }} --no-git-tag-version
+          npm publish --access public
+      - name: Upload Standalone Bundle Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./dist/BandwidthRtc.bundle.js
+          asset_name: BandwidthRtc.bundle.js
+          asset_content_type: application/javascript

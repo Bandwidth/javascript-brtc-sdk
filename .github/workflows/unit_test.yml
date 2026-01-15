@@ -1,0 +1,22 @@
+name: Unit Tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          check-latest: true
+      - name: npm install
+        run: npm install
+      - name: npm test
+        run: npm test
+      - name: npm build
+        run: npm run build
