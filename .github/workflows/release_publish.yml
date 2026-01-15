@@ -5,6 +5,10 @@ on:
     types:
       - published
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   publish-npm:
     # Only run if release is a prod release
