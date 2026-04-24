@@ -94,19 +94,39 @@ describe("Signaling connect method", () => {
     }
   });
 
-  test("should emit established when websocket receives established", async () => {
+  test("should merge connectStatus into readyMetadata and re-emit ready", async () => {
     const emitSpy = jest.spyOn(signaling, "emit");
 
     await signaling.connect({ endpointToken: "test-token" });
 
-    // Get the websocket instance and trigger established event
     const ws = (signaling as any).ws;
-    const establishedCallback = ws.on.mock.calls.find((call: any) => call[0] === "established")?.[1];
+    const connectStatusCallback = ws.on.mock.calls.find((call: any) => call[0] === "connectStatus")?.[1];
 
-    if (establishedCallback) {
-      const testEvent = { connectionId: "test-connection" };
-      establishedCallback(testEvent);
-      expect(emitSpy).toHaveBeenCalledWith("established", testEvent);
+    if (connectStatusCallback) {
+      const testEvent = {
+        status: "COMPLETED",
+        accountId: "9900000",
+        sessionId: "session-1",
+        from: "ep-1",
+        fromType: "ENDPOINT",
+        fromTags: "tag1",
+        to: "ep-2",
+        toType: "ENDPOINT",
+        toTags: "tag2",
+      };
+      connectStatusCallback(testEvent);
+      expect(emitSpy).toHaveBeenCalledWith("ready", expect.objectContaining({
+        endpointId: "test-endpoint",
+        connectStatus: "COMPLETED",
+        accountId: "9900000",
+        sessionId: "session-1",
+        from: "ep-1",
+        fromType: "ENDPOINT",
+        fromTags: "tag1",
+        to: "ep-2",
+        toType: "ENDPOINT",
+        toTags: "tag2",
+      }));
     }
   });
 });

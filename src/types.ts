@@ -21,6 +21,15 @@ export enum EndpointType {
   PHONE_NUMBER = "PHONE_NUMBER",
 }
 
+export enum ConnectStatus {
+  INITIATED = "INITIATED",
+  COMPLETED = "COMPLETED",
+  TIMED_OUT = "TIMED_OUT",
+  DENIED = "DENIED",
+  CANCELED = "CANCELED",
+  FAILED = "FAILED",
+}
+
 export type AudioLevelChangeHandler = { (audioLevel: AudioLevel): void };
 
 /**
@@ -49,6 +58,15 @@ export interface ReadyMetadata {
   deviceId: string;
   territory: string; // TODO enum
   region: string; // TODO enum
+  connectStatus?: ConnectStatus;
+  accountId?: string;
+  sessionId?: string;
+  from?: string;
+  fromType?: string;
+  fromTags?: string;
+  to?: string;
+  toType?: string;
+  toTags?: string;
 }
 
 export interface OutboundConnectionResult {

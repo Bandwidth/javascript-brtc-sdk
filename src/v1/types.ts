@@ -1,4 +1,4 @@
-import { MediaType } from "../types";
+import { MediaType, ConnectStatus } from "../types";
 
 export interface SetMediaPreferencesWebRtcResponse {
   endpointId: string;
@@ -69,4 +69,13 @@ export interface ReadyMetadata {
   deviceId: string;
   territory: string; // TODO enum
   region: string; // TODO enum
+  connectStatus?: ConnectStatus;
+  accountId?: string;
+  sessionId?: string;
+  from?: string;
+  fromType?: string;
+  fromTags?: string;
+  to?: string;
+  toType?: string;
+  toTags?: string;
 }
