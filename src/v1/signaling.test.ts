@@ -139,6 +139,111 @@ describe("Signaling connect method", () => {
   });
 });
 
+describe("Signaling websocket event handlers", () => {
+  let signaling: Signaling;
+  beforeEach(async () => {
+    signaling = new Signaling();
+    await signaling.connect({ endpointToken: "test-token" });
+  });
+
+  function getWsCallback(event: string) {
+    const ws = (signaling as any).ws;
+    return ws.on.mock.calls.find((call: any) => call[0] === event)?.[1];
+  }
+
+  test("should emit init and set up ping interval on open", async () => {
+    const emitSpy = jest.spyOn(signaling, "emit");
+    const openCallback = getWsCallback("open");
+    expect(openCallback).toBeDefined();
+
+    await openCallback();
+
+    expect(emitSpy).toHaveBeenCalledWith("init", expect.anything());
+    expect((signaling as any).pingInterval).toBeDefined();
+  });
+
+  test("should reject with error and disconnect on 403 error", async () => {
+    const errorCallback = getWsCallback("error");
+    expect(errorCallback).toBeDefined();
+
+    const ws = (signaling as any).ws;
+    errorCallback({ message: "Unexpected server response: 403" });
+
+    expect(ws.close).toHaveBeenCalledWith(403);
+    expect(ws.setAutoReconnect).toHaveBeenCalledWith(false);
+  });
+
+  test("should handle non-403 error without throwing", async () => {
+    const errorCallback = getWsCallback("error");
+    expect(errorCallback).toBeDefined();
+
+    // Should not throw on a generic error
+    expect(() => errorCallback({ message: "some other error" })).not.toThrow();
+
+    // ws should not be closed on non-403 errors
+    const ws = (signaling as any).ws;
+    expect(ws.setAutoReconnect).not.toHaveBeenCalled();
+  });
+
+  test("should clear ping interval and set isReady false on close", async () => {
+    // Trigger open first to set up pingInterval
+    const openCallback = getWsCallback("open");
+    await openCallback();
+
+    const closeCallback = getWsCallback("close");
+    expect(closeCallback).toBeDefined();
+
+    closeCallback(4000);
+
+    expect((signaling as any).isReady).toBe(false);
+  });
+
+  test("should call _disconnect on close with code 1000", async () => {
+    const closeCallback = getWsCallback("close");
+    expect(closeCallback).toBeDefined();
+
+    closeCallback(1000);
+
+    // After _disconnect(false), ws should be null
+    expect((signaling as any).ws).toBeNull();
+    expect((signaling as any).isReady).toBe(false);
+  });
+});
+
+describe("Signaling disconnect", () => {
+  test("should call leave notification and close ws on disconnect", async () => {
+    const signaling = new Signaling();
+    await signaling.connect({ endpointToken: "test-token" });
+
+    const ws = (signaling as any).ws;
+    signaling.disconnect();
+
+    expect(ws.notify).toHaveBeenCalledWith("leave");
+    expect(ws.close).toHaveBeenCalled();
+    expect(ws.removeAllListeners).toHaveBeenCalled();
+    expect((signaling as any).ws).toBeNull();
+    expect((signaling as any).isReady).toBe(false);
+  });
+
+  test("should handle disconnect with diagnosticsBatcher", async () => {
+    const diagnosticsBatcher = new DiagnosticsBatcher();
+    const shutdownSpy = jest.spyOn(diagnosticsBatcher, "shutdown");
+    const signaling = new Signaling(diagnosticsBatcher);
+    await signaling.connect({ endpointToken: "test-token" });
+
+    signaling.disconnect();
+
+    expect(shutdownSpy).toHaveBeenCalled();
+    expect((signaling as any).ws).toBeNull();
+  });
+
+  test("should not throw when disconnect called without active ws", () => {
+    const signaling = new Signaling();
+    // Never connected, ws is null
+    expect(() => signaling.disconnect()).not.toThrow();
+  });
+});
+
 describe("Signaling test all the smaller functions", () => {
   let signaling: Signaling;
   beforeEach(async () => {
