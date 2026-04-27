@@ -52,7 +52,6 @@ class Signaling extends EventEmitter {
         this.emit("sdpOffer", event);
       });
 
-
       ws.on("open", async () => {
         logger.debug("Websocket open");
         if (globalThis.addEventListener) {
