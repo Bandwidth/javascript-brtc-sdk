@@ -94,29 +94,21 @@ describe("Signaling connect method", () => {
     }
   });
 
-  test("should merge connectStatus into readyMetadata and re-emit ready", async () => {
+  test("should emit ready with connectStatus fields when gateway sends ready with connect status data", async () => {
     const emitSpy = jest.spyOn(signaling, "emit");
 
     await signaling.connect({ endpointToken: "test-token" });
 
+    // Simulate a second ready event from the gateway that includes connect status fields
     const ws = (signaling as any).ws;
-    const connectStatusCallback = ws.on.mock.calls.find((call: any) => call[0] === "connectStatus")?.[1];
+    const readyCallback = ws.on.mock.calls.find((call: any) => call[0] === "ready")?.[1];
 
-    if (connectStatusCallback) {
-      const testEvent = {
-        status: "COMPLETED",
-        accountId: "9900000",
-        sessionId: "session-1",
-        from: "ep-1",
-        fromType: "ENDPOINT",
-        fromTags: "tag1",
-        to: "ep-2",
-        toType: "ENDPOINT",
-        toTags: "tag2",
-      };
-      connectStatusCallback(testEvent);
-      expect(emitSpy).toHaveBeenCalledWith("ready", expect.objectContaining({
+    if (readyCallback) {
+      const readyWithConnectStatus = {
         endpointId: "test-endpoint",
+        deviceId: "device-1",
+        territory: "US",
+        region: "us-east-1",
         connectStatus: "COMPLETED",
         accountId: "9900000",
         sessionId: "session-1",
@@ -126,7 +118,23 @@ describe("Signaling connect method", () => {
         to: "ep-2",
         toType: "ENDPOINT",
         toTags: "tag2",
-      }));
+      };
+      readyCallback(readyWithConnectStatus);
+      expect(emitSpy).toHaveBeenCalledWith(
+        "ready",
+        expect.objectContaining({
+          endpointId: "test-endpoint",
+          connectStatus: "COMPLETED",
+          accountId: "9900000",
+          sessionId: "session-1",
+          from: "ep-1",
+          fromType: "ENDPOINT",
+          fromTags: "tag1",
+          to: "ep-2",
+          toType: "ENDPOINT",
+          toTags: "tag2",
+        }),
+      );
     }
   });
 });

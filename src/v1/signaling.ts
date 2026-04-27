@@ -52,22 +52,6 @@ class Signaling extends EventEmitter {
         this.emit("sdpOffer", event);
       });
 
-      ws.on("connectStatus", (event: any) => {
-        logger.debug("Websocket connectStatus", event);
-        this.readyMetadata = {
-          ...this.readyMetadata!,
-          connectStatus: event.status,
-          accountId: event.accountId,
-          sessionId: event.sessionId,
-          from: event.from,
-          fromType: event.fromType,
-          fromTags: event.fromTags,
-          to: event.to,
-          toType: event.toType,
-          toTags: event.toTags,
-        };
-        this.emit("ready", this.readyMetadata);
-      });
 
       ws.on("open", async () => {
         logger.debug("Websocket open");

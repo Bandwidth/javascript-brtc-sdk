@@ -147,6 +147,7 @@ export class BandwidthRtc {
     this.readyHandler = callback;
   }
 
+
   /**
    * Publish media to the Bandwidth WebRTC platform
    *
