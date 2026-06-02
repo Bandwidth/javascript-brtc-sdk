@@ -112,13 +112,6 @@ export class BandwidthRtc {
     this.signaling.on("streamAvailable", ({ callId }: { callId: string }) => {
       if (this.streamAvailableHandler) {
         this.streamAvailableHandler({ mediaTypes: [MediaType.AUDIO], callId });
-      } else {
-        // No handler registered — auto-accept so existing apps that never call
-        // acceptStream keep working after the gateway started closing the gate
-        // between calls.
-        this.signaling.acceptStream(callId).catch((err) => {
-          logger.warn("auto-acceptStream failed", err);
-        });
       }
     });
     this.signaling.on("streamUnavailable", ({ callId }: { callId: string }) => {
