@@ -79,6 +79,14 @@ class Signaling extends EventEmitter {
         resolve();
       });
 
+      ws.on("streamAvailable", (event: { callId: string; endpointId: string }) => {
+        this.emit("streamAvailable", event);
+      });
+
+      ws.on("streamUnavailable", (event: { callId: string; endpointId: string }) => {
+        this.emit("streamUnavailable", event);
+      });
+
       ws.on("error", (error: ErrorEvent) => {
         if (error.message === "Unexpected server response: 403") {
           logger.error("Authentication error: Invalid token");
@@ -167,6 +175,16 @@ class Signaling extends EventEmitter {
       endpoint: endpoint,
       type: type,
     }) as Promise<HangupResult>;
+  }
+
+  acceptStream(callId?: string): Promise<void> {
+    logger.debug(`Calling "acceptStream"`, { callId });
+    return this.ws?.call("acceptStream", callId ? { callId } : {}) as Promise<void>;
+  }
+
+  declineStream(callId?: string): Promise<void> {
+    logger.debug(`Calling "declineStream"`, { callId });
+    return this.ws?.call("declineStream", callId ? { callId } : {}) as Promise<void>;
   }
 
   offerSdp(peerType: string, sdpOffer: string): Promise<SdpAnswer> {

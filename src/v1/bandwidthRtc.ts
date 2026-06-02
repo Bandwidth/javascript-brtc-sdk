@@ -109,6 +109,16 @@ export class BandwidthRtc {
     this.signaling.on("ready", this.handleReady.bind(this));
     this.signaling.on("sdpOffer", this.handleSubscribeSdpOffer.bind(this));
     this.signaling.on("init", this.init.bind(this));
+    this.signaling.on("streamAvailable", ({ callId }: { callId: string }) => {
+      if (this.streamAvailableHandler) {
+        this.streamAvailableHandler({ mediaTypes: [MediaType.AUDIO], callId });
+      }
+    });
+    this.signaling.on("streamUnavailable", ({ callId }: { callId: string }) => {
+      if (this.streamUnavailableHandler) {
+        this.streamUnavailableHandler({ mediaTypes: [MediaType.AUDIO], callId });
+      }
+    });
 
     await this.signaling.connect(authParams, options);
     logger.info("Successfully connected");
@@ -229,7 +239,7 @@ export class BandwidthRtc {
         }
       } else {
         publishedStreams.push({
-          mediaStream: stream.mediaStream,
+          mediaStream: stream.mediaStream!,
         });
       }
     }
@@ -294,7 +304,7 @@ export class BandwidthRtc {
   setMicEnabled(enabled: boolean, stream?: RtcStream | string) {
     logger.info(`Setting microphone enabled: ${enabled}`);
     if (stream && typeof stream !== "string") {
-      stream = stream.mediaStream.id;
+      stream = stream.mediaStream!.id;
     }
     [...this.publishedStreams]
       .filter(([msid]) => !stream || stream === msid)
@@ -309,7 +319,7 @@ export class BandwidthRtc {
   setCameraEnabled(enabled: boolean, stream?: RtcStream | string) {
     logger.info(`Setting camera enabled: ${enabled}`);
     if (stream && typeof stream !== "string") {
-      stream = stream.mediaStream.id;
+      stream = stream.mediaStream!.id;
     }
     [...this.publishedStreams]
       .filter(([msid]) => !stream || stream === msid)
@@ -335,6 +345,14 @@ export class BandwidthRtc {
 
   hangupConnection(endpoint: string, type: EndpointType): Promise<HangupResult> {
     return this.signaling.hangupConnection(endpoint, type);
+  }
+
+  acceptStream(callId?: string): Promise<void> {
+    return this.signaling.acceptStream(callId);
+  }
+
+  declineStream(callId?: string): Promise<void> {
+    return this.signaling.declineStream(callId);
   }
 
   private async offerPublishSdp(restartIce: boolean = false): Promise<SdpAnswer> {

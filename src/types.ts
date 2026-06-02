@@ -48,7 +48,8 @@ export interface RtcOptions {
 
 export interface RtcStream {
   mediaTypes: MediaType[];
-  mediaStream: MediaStream;
+  mediaStream?: MediaStream;
+  callId?: string;
 }
 
 export class BandwidthRtcError extends Error {}
