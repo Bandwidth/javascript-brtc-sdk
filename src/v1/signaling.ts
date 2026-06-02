@@ -52,6 +52,10 @@ class Signaling extends EventEmitter {
         this.emit("sdpOffer", event);
       });
 
+      ws.on("established", (event: any) => {
+        this.emit("established", event);
+      });
+
       ws.on("open", async () => {
         logger.debug("Websocket open");
         if (globalThis.addEventListener) {
@@ -191,14 +195,6 @@ class Signaling extends EventEmitter {
     logger.debug(`Calling "offerSdp"`, { sdpOffer: sdpOffer, peerType: peerType });
     return this.ws?.call("offerSdp", { sdpOffer: sdpOffer, peerType: peerType }) as Promise<SdpAnswer>;
   }
-
-  // offerSdp(sdpOffer: string, metadata: PublishMetadata): Promise<PublishSdpAnswer> {
-  //   logger.debug(`Calling "offerSdp"`, { sdpOffer: sdpOffer, mediaMetadata: metadata });
-  //   return this.ws?.call("offerSdp", {
-  //     sdpOffer: sdpOffer,
-  //     mediaMetadata: metadata,
-  //   }) as Promise<PublishSdpAnswer>;
-  // }
 
   answerSdp(sdpAnswer: string, peerType: string): Promise<void> {
     logger.debug(`Calling "answerSdp"`, { sdpAnswer: sdpAnswer });
