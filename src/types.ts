@@ -35,6 +35,13 @@ export interface RtcOptions {
   websocketUrl?: string;
   iceServers?: RTCIceServer[];
   iceTransportPolicy?: RTCIceTransportPolicy;
+  /**
+   * When true (default), the gateway re-opens the egress gate immediately after
+   * each call ends so the next call's audio flows without any round-trip delay.
+   * Set to false to restore the legacy behaviour where the gate stays closed
+   * between calls until the gateway processes streamAvailable.
+   */
+  autoOpenEgressGate?: boolean;
 }
 
 export interface RtcStream {

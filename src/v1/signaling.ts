@@ -15,6 +15,7 @@ class Signaling extends EventEmitter {
   private isReady: boolean = false;
   private readyMetadata: ReadyMetadata | null = null;
   private diagnosticsBatcher?: DiagnosticsBatcher;
+  private rtcOptions?: RtcOptions;
 
   constructor(diagnosticsBatcher?: DiagnosticsBatcher) {
     super();
@@ -35,6 +36,7 @@ class Signaling extends EventEmitter {
       if (options) {
         rtcOptions = { ...rtcOptions, ...options };
       }
+      this.rtcOptions = rtcOptions;
       const websocketUrl = `${rtcOptions.websocketUrl}?client=node&sdkVersion=${sdkVersion}&uniqueId=${this.uniqueDeviceId}&endpointToken=${authParams.endpointToken}`;
       logger.debug(`Connecting to ${websocketUrl}`);
       console.log(`Connecting to ${websocketUrl}`);
@@ -122,9 +124,11 @@ class Signaling extends EventEmitter {
   }
 
   private setMediaPreferences(): Promise<{}> {
-    logger.debug(`Calling "setMediaPreferences"`, { protocol: "WEBRTC" });
+    const autoOpenEgressGate = this.rtcOptions?.autoOpenEgressGate ?? true;
+    logger.debug(`Calling "setMediaPreferences"`, { protocol: "WEBRTC", autoOpenEgressGate });
     return this.ws?.call("setMediaPreferences", {
       protocol: "WEBRTC",
+      autoOpenEgressGate,
     }) as Promise<SetMediaPreferencesWebRtcResponse>;
   }
 
