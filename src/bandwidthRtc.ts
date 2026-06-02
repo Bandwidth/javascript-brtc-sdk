@@ -257,6 +257,20 @@ class BandwidthRtc {
     }
     return this.delegate.hangupConnection(endpoint, type);
   }
+
+  acceptStream(callId?: string): Promise<void> {
+    if (!this.delegate) {
+      throw new BandwidthRtcError("You must call 'connect' before 'acceptStream'");
+    }
+    return this.delegate.acceptStream(callId);
+  }
+
+  declineStream(callId?: string): Promise<void> {
+    if (!this.delegate) {
+      throw new BandwidthRtcError("You must call 'connect' before 'declineStream'");
+    }
+    return this.delegate.declineStream(callId);
+  }
 }
 
 interface JwtPayload {
