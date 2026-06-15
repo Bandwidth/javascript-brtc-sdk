@@ -77,6 +77,7 @@ export class BandwidthRtc {
   // Event handlers
   private streamAvailableHandler?: { (event: RtcStream): void };
   private streamUnavailableHandler?: { (event: RtcStream): void };
+  private inboundStreamNotificationHandler?: { (event: RtcStream): void };
   private readyHandler?: { (readyMetadata: ReadyMetadata): void };
 
   /**
@@ -109,9 +110,9 @@ export class BandwidthRtc {
     this.signaling.on("ready", this.handleReady.bind(this));
     this.signaling.on("sdpOffer", this.handleSubscribeSdpOffer.bind(this));
     this.signaling.on("init", this.init.bind(this));
-    this.signaling.on("streamAvailable", ({ callId }: { callId: string }) => {
-      if (this.streamAvailableHandler) {
-        this.streamAvailableHandler({ mediaTypes: [MediaType.AUDIO], callId });
+    this.signaling.on("streamAvailable", ({ callId, autoAccepted }: { callId: string; autoAccepted: boolean }) => {
+      if (this.inboundStreamNotificationHandler) {
+        this.inboundStreamNotificationHandler({ mediaTypes: [MediaType.AUDIO], callId, autoAccepted });
       }
     });
     this.signaling.on("streamUnavailable", ({ callId }: { callId: string }) => {
@@ -134,11 +135,22 @@ export class BandwidthRtc {
   }
 
   /**
-   * Set the function that will be called when a subscribed stream becomes available
+   * Set the function that will be called when a subscribed stream becomes available.
+   * The RtcStream passed to the callback always contains a populated mediaStream.
    * @param callback callback function
    */
   onStreamAvailable(callback: { (event: RtcStream): void }): void {
     this.streamAvailableHandler = callback;
+  }
+
+  /**
+   * Set the function that will be called when the gateway signals that an inbound
+   * stream is ready to be accepted or declined, before the WebRTC media arrives.
+   * Use this to drive accept/decline UI; mediaStream will be undefined at this point.
+   * @param callback callback function
+   */
+  onInboundStreamNotification(callback: { (event: RtcStream): void }): void {
+    this.inboundStreamNotificationHandler = callback;
   }
 
   /**
