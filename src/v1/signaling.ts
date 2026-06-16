@@ -85,7 +85,7 @@ class Signaling extends EventEmitter {
         resolve();
       });
 
-      ws.on("streamAvailable", (event: { callId: string; endpointId: string }) => {
+      ws.on("streamAvailable", (event: { callId: string; endpointId: string; autoAccepted: boolean }) => {
         this.emit("streamAvailable", event);
       });
 
@@ -124,11 +124,11 @@ class Signaling extends EventEmitter {
   }
 
   private setMediaPreferences(): Promise<{}> {
-    const autoOpenEgressGate = this.rtcOptions?.autoOpenEgressGate ?? true;
-    logger.debug(`Calling "setMediaPreferences"`, { protocol: "WEBRTC", autoOpenEgressGate });
+    const autoAccept = this.rtcOptions?.autoAccept ?? true;
+    logger.debug(`Calling "setMediaPreferences"`, { protocol: "WEBRTC", autoAccept });
     return this.ws?.call("setMediaPreferences", {
       protocol: "WEBRTC",
-      autoOpenEgressGate,
+      autoAccept,
     }) as Promise<SetMediaPreferencesWebRtcResponse>;
   }
 

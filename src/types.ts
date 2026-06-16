@@ -36,18 +36,19 @@ export interface RtcOptions {
   iceServers?: RTCIceServer[];
   iceTransportPolicy?: RTCIceTransportPolicy;
   /**
-   * When true (default), the gateway re-opens the egress gate immediately after
-   * each call ends so the next call's audio flows without any round-trip delay.
-   * Set to false to restore the legacy behaviour where the gate stays closed
-   * between calls until the gateway processes streamAvailable.
+   * When true (default), the gateway sets autoAccepted=true on the streamAvailable
+   * notification so the SDK skips the accept/decline prompt and the call connects
+   * immediately. Set to false to show a prompt and require the user to call
+   * acceptStream or declineStream.
    */
-  autoOpenEgressGate?: boolean;
+  autoAccept?: boolean;
 }
 
 export interface RtcStream {
   mediaTypes: MediaType[];
   mediaStream?: MediaStream;
   callId?: string;
+  autoAccepted?: boolean;
 }
 
 export class BandwidthRtcError extends Error {}
