@@ -55,6 +55,70 @@ describe("bandwidhthRtcV1 constructor", () => {
   });
 });
 
+describe("bandwidthRtcV1 sendDtmf", () => {
+  beforeAll(() => {
+    setupNavigatorMocks();
+    setupMocks();
+  });
+
+  function makeDtmfSender() {
+    return { insertDTMF: jest.fn() };
+  }
+
+  test("calls insertDTMF on all registered senders when no streamId given", () => {
+    const brtc = new BandwidthRtc();
+    const sender1 = makeDtmfSender();
+    const sender2 = makeDtmfSender();
+    (brtc as any).localDtmfSenders.set("stream-1", sender1);
+    (brtc as any).localDtmfSenders.set("stream-2", sender2);
+
+    brtc.sendDtmf("5");
+
+    expect(sender1.insertDTMF).toHaveBeenCalledTimes(1);
+    expect(sender1.insertDTMF).toHaveBeenCalledWith("5", undefined, undefined);
+    expect(sender2.insertDTMF).toHaveBeenCalledTimes(1);
+    expect(sender2.insertDTMF).toHaveBeenCalledWith("5", undefined, undefined);
+  });
+
+  test("calls insertDTMF only on the specified stream when streamId given", () => {
+    const brtc = new BandwidthRtc();
+    const sender1 = makeDtmfSender();
+    const sender2 = makeDtmfSender();
+    (brtc as any).localDtmfSenders.set("stream-1", sender1);
+    (brtc as any).localDtmfSenders.set("stream-2", sender2);
+
+    brtc.sendDtmf("9", "stream-1");
+
+    expect(sender1.insertDTMF).toHaveBeenCalledTimes(1);
+    expect(sender2.insertDTMF).not.toHaveBeenCalled();
+  });
+
+  test("forwards duration and interToneGap to insertDTMF", () => {
+    const brtc = new BandwidthRtc();
+    const sender = makeDtmfSender();
+    (brtc as any).localDtmfSenders.set("stream-1", sender);
+
+    brtc.sendDtmf("1", undefined, 200, 80);
+
+    expect(sender.insertDTMF).toHaveBeenCalledWith("1", 200, 80);
+  });
+
+  test("does not throw when no senders are registered", () => {
+    const brtc = new BandwidthRtc();
+    expect(() => brtc.sendDtmf("5")).not.toThrow();
+  });
+
+  test("does nothing for an unknown streamId", () => {
+    const brtc = new BandwidthRtc();
+    const sender = makeDtmfSender();
+    (brtc as any).localDtmfSenders.set("stream-1", sender);
+
+    brtc.sendDtmf("5", "nonexistent");
+
+    expect(sender.insertDTMF).not.toHaveBeenCalled();
+  });
+});
+
 describe("bandwidthRtcV1 connect method", () => {
   beforeAll(() => {
     setupNavigatorMocks();

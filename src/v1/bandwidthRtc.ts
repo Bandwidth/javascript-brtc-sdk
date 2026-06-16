@@ -274,15 +274,17 @@ export class BandwidthRtc {
   }
 
   /**
-   * DTMF Sender that layers DTMF tones onto an existing stream.
-   * @param tone The DTMF tones to send - a string composed of the characters [0-9,*,#,\,]*
-   * @param streamId The optional stream id to play on.
+   * Send DTMF tones via the browser's native RTCDTMFSender (RFC 4733).
+   * @param tone The DTMF tones to send - a string composed of the characters [0-9,*,#,A-D,\,]*
+   * @param streamId The optional stream id to send on; defaults to all published streams.
+   * @param duration Tone duration in milliseconds (default: 100). Must be between 40 and 6000.
+   * @param interToneGap Gap between tones in milliseconds (default: 70). Minimum 30.
    */
-  sendDtmf(tone: string, streamId?: string) {
+  sendDtmf(tone: string, streamId?: string, duration?: number, interToneGap?: number) {
     if (streamId) {
-      this.localDtmfSenders.get(streamId)?.insertDTMF(tone);
+      this.localDtmfSenders.get(streamId)?.insertDTMF(tone, duration, interToneGap);
     } else {
-      this.localDtmfSenders.forEach((dtmfSender) => dtmfSender.insertDTMF(tone));
+      this.localDtmfSenders.forEach((dtmfSender) => dtmfSender.insertDTMF(tone, duration, interToneGap));
     }
   }
 
@@ -639,9 +641,12 @@ export class BandwidthRtc {
         streams: [mediaStream],
       });
 
-      // Inject DTMF into one audio track in the stream
-      if (track.kind === "audio" && !this.localDtmfSenders.has(mediaStream.id)) {
-        this.localDtmfSenders.set(mediaStream.id, transceiver.sender.dtmf!);
+      // Inject DTMF into one audio track in the stream via the browser's native
+      // RTCDTMFSender. rtpSender.dtmf can be null when the browser doesn't
+      // support DTMF for this track, so guard before storing.
+      const dtmfSender = transceiver.sender.dtmf;
+      if (track.kind === "audio" && dtmfSender && !this.localDtmfSenders.has(mediaStream.id)) {
+        this.localDtmfSenders.set(mediaStream.id, dtmfSender);
       }
 
       if (codecPreferences) {
