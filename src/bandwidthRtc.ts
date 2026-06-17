@@ -22,7 +22,6 @@ class BandwidthRtc {
   // Event handlers
   private streamAvailableHandler?: { (event: RtcStream): void };
   private streamUnavailableHandler?: { (event: RtcStream): void };
-  private inboundStreamNotificationHandler?: { (event: RtcStream): void };
   private readyHandler?: { (readyMetadata: ReadyMetadata): void };
 
   private logLevel?: LogLevel;
@@ -78,10 +77,6 @@ class BandwidthRtc {
       this.delegate!.onStreamUnavailable(this.streamUnavailableHandler);
     }
 
-    if (this.inboundStreamNotificationHandler) {
-      this.delegate!.onInboundStreamNotification(this.inboundStreamNotificationHandler);
-    }
-
     if (this.readyHandler) {
       this.delegate!.onReady(this.readyHandler);
     }
@@ -118,19 +113,6 @@ class BandwidthRtc {
     this.streamUnavailableHandler = callback;
     if (this.delegate) {
       this.delegate.onStreamUnavailable(callback);
-    }
-  }
-
-  /**
-   * Set the function that will be called when the gateway signals that an inbound
-   * stream is ready to be accepted or declined, before the WebRTC media arrives.
-   * Use this to drive accept/decline UI; mediaStream will be undefined at this point.
-   * @param callback callback function
-   */
-  onInboundStreamNotification(callback: { (event: RtcStream): void }): void {
-    this.inboundStreamNotificationHandler = callback;
-    if (this.delegate) {
-      this.delegate.onInboundStreamNotification(callback);
     }
   }
 
