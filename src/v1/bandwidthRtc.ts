@@ -36,8 +36,23 @@ const RTC_CONFIGURATION: RTCConfiguration = {
   bundlePolicy: "max-bundle",
   rtcpMuxPolicy: "require",
 };
+
 const HEARTBEAT_DATA_CHANNEL_LABEL = "__heartbeat__";
 const DIAGNOSTICS_DATA_CHANNEL_LABEL = "__diagnostics__";
+
+const PEER_CONNECTION_TYPE_PUBLISH = "publish";
+const PEER_CONNECTION_TYPE_SUBSCRIBE = "subscribe";
+
+const TRACK_KIND_AUDIO = "audio";
+const TRACK_KIND_VIDEO = "video";
+const TELEPHONE_EVENT_MIME_TYPE = "audio/telephone-event";
+
+const HEARTBEAT_PING = "PING";
+const HEARTBEAT_PONG = "PONG";
+const DATA_CHANNEL_STATE_OPEN = "open";
+
+const CONNECTION_STATE_FAILED = "failed";
+const CONNECTION_STATE_DISCONNECTED = "disconnected";
 
 export class BandwidthRtc {
   private options?: RtcOptions;
@@ -290,7 +305,7 @@ export class BandwidthRtc {
    * @param duration Tone duration in milliseconds (default: 100). Must be between 40 and 6000.
    * @param interToneGap Gap between tones in milliseconds (default: 70). Minimum 30.
    */
-  sendDtmf(tone: string, streamId?: string, duration?: number, interToneGap?: number) {
+  sendDtmf(tone: string, streamId?: string, duration: number = 100, interToneGap: number = 70) {
     if (streamId) {
       this.localDtmfSenders.get(streamId)?.insertDTMF(tone, duration, interToneGap);
     } else {
@@ -378,7 +393,7 @@ export class BandwidthRtc {
         ),
       );
       logger.debug("publish metadata", publishMetadata);
-      const remoteSdpAnswer = await this.signaling.offerSdp("publish", localSdpOffer.sdp!);
+      const remoteSdpAnswer = await this.signaling.offerSdp(PEER_CONNECTION_TYPE_PUBLISH, localSdpOffer.sdp!);
 
       await this.publishingPeerConnection!.setLocalDescription(localSdpOffer);
       logger.debug("remoteSdpAnswer", remoteSdpAnswer);
@@ -426,7 +441,7 @@ export class BandwidthRtc {
         }
 
         await this.subscribingPeerConnection!.setLocalDescription(localSdpAnswer);
-        await this.signaling.answerSdp(localSdpAnswer.sdp, "subscribe");
+        await this.signaling.answerSdp(localSdpAnswer.sdp, PEER_CONNECTION_TYPE_SUBSCRIBE);
 
         this.subscribingPeerConnectionSdpRevision = subscribeSdpOffer.sdpRevision;
         logger.debug(`set current SDP revision to ${this.subscribingPeerConnectionSdpRevision}`);
@@ -441,7 +456,7 @@ export class BandwidthRtc {
     const publishOnTrackHandler = (event: RTCTrackEvent) => {
       logger.debug("publish ontrack event", event);
     };
-    this.publishingPeerConnection = await this.setupPeerConnection("publish", publishOnTrackHandler, setMediaPreferencesResponse.publishSdpOffer.sdpOffer);
+    this.publishingPeerConnection = await this.setupPeerConnection(PEER_CONNECTION_TYPE_PUBLISH, publishOnTrackHandler, setMediaPreferencesResponse.publishSdpOffer.sdpOffer);
 
     let streamTracks: Map<MediaStream, Set<MediaStreamTrack>> = new Map();
 
@@ -502,7 +517,7 @@ export class BandwidthRtc {
       }
     };
     this.subscribingPeerConnection = await this.setupPeerConnection(
-      "subscribe",
+      PEER_CONNECTION_TYPE_SUBSCRIBE,
       subscriptionOnTrackHandler,
       setMediaPreferencesResponse.subscribeSdpOffer.sdpOffer,
     );
@@ -522,7 +537,7 @@ export class BandwidthRtc {
         const pc = event.target as RTCPeerConnection;
         let connectionState = pc.connectionState;
         logger.debug("onconnectionstatechange", connectionState, pc);
-        if (connectionState === "failed") {
+        if (connectionState === CONNECTION_STATE_FAILED) {
           logger.warn("Connection failed, attempting to restart ICE TODO");
           // await this.offerPublishSdp(true);
           // connectionState = pc.connectionState;
@@ -568,9 +583,9 @@ export class BandwidthRtc {
         // Handle heartbeat messages
         dataChannel.onmessage = (event) => {
           logger.debug("Heartbeat Data Channel message", event.data);
-          if (event.data == "PING" && dataChannel.readyState === "open") {
+          if (event.data == HEARTBEAT_PING && dataChannel.readyState === DATA_CHANNEL_STATE_OPEN) {
             logger.debug("Received PING, sending PONG");
-            dataChannel.send("PONG");
+            dataChannel.send(HEARTBEAT_PONG);
           }
         };
       } else if (dataChannel.label === DIAGNOSTICS_DATA_CHANNEL_LABEL) {
@@ -587,7 +602,7 @@ export class BandwidthRtc {
         const pc = event.target as RTCPeerConnection;
         logger.debug("onconnectionstatechange", pc.connectionState, pc);
         const connectionState = pc.connectionState;
-        if (connectionState === "disconnected") {
+        if (connectionState === CONNECTION_STATE_DISCONNECTED) {
           logger.warn("Peer disconnected, connection may be reestablished");
         }
       } catch (err) {
@@ -655,14 +670,23 @@ export class BandwidthRtc {
       // RTCDTMFSender. rtpSender.dtmf can be null when the browser doesn't
       // support DTMF for this track, so guard before storing.
       const dtmfSender = transceiver.sender.dtmf;
-      if (track.kind === "audio" && dtmfSender && !this.localDtmfSenders.has(mediaStream.id)) {
+      if (track.kind === TRACK_KIND_AUDIO && dtmfSender && !this.localDtmfSenders.has(mediaStream.id)) {
         this.localDtmfSenders.set(mediaStream.id, dtmfSender);
       }
 
       if (codecPreferences) {
-        if (track.kind === "audio" && codecPreferences.audio) {
-          transceiver.setCodecPreferences(codecPreferences.audio);
-        } else if (track.kind === "video" && codecPreferences.video) {
+        if (track.kind === TRACK_KIND_AUDIO && codecPreferences.audio) {
+          // setCodecPreferences is a strict allowlist: any codec omitted from the
+          // list is dropped from the SDP offer. telephone-event must always be
+          // present so that RTCDTMFSender can send RFC 4733 DTMF packets.
+          const hasTelephoneEvent = codecPreferences.audio.some((c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE);
+          if (!hasTelephoneEvent) {
+            const telephoneEventCodec = RTCRtpSender.getCapabilities(TRACK_KIND_AUDIO)?.codecs.find((c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE);
+            transceiver.setCodecPreferences(telephoneEventCodec ? [...codecPreferences.audio, telephoneEventCodec] : codecPreferences.audio);
+          } else {
+            transceiver.setCodecPreferences(codecPreferences.audio);
+          }
+        } else if (track.kind === TRACK_KIND_VIDEO && codecPreferences.video) {
           transceiver.setCodecPreferences(codecPreferences.video);
         }
       }
