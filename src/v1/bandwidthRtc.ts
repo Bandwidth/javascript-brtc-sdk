@@ -57,17 +57,13 @@ const CONNECTION_STATE_DISCONNECTED = "disconnected";
 export class BandwidthRtc {
   private options?: RtcOptions;
 
-  // Batches diagnostic data for debugging
   private diagnosticsBatcher: DiagnosticsBatcher;
-
-  // Communicates with the Bandwidth WebRTC platform
   private signaling: Signaling;
 
-  // One peer for all published (outgoing) streams, one for all subscribed (incoming) streams
+  // One peer connection for all published (outgoing) streams, one for all subscribed (incoming) streams
   private publishingPeerConnection?: RTCPeerConnection;
   private subscribingPeerConnection?: RTCPeerConnection;
 
-  // Standard datachannels used for platform diagnostics and health checks
   private publishHeartbeatDataChannel?: RTCDataChannel;
   private publishDiagnosticsDataChannel?: RTCDataChannel;
   private publishedDataChannels: Map<string, RTCDataChannel> = new Map();
@@ -79,17 +75,14 @@ export class BandwidthRtc {
   private publishMutex: Mutex = new Mutex();
   private subscribeMutex: Mutex = new Mutex();
 
-  // Lookup maps for streams, keyed by mediastream id (msid)
   private publishedStreams: Map<string, PublishedStream> = new Map();
   private subscribedStreams: Map<string, StreamMetadata> = new Map();
 
   // Current SDP revision for the subscribing peer; used to reject outdated SDP offers
   private subscribingPeerConnectionSdpRevision = 0;
 
-  // DTMF
   private localDtmfSenders: Map<string, RTCDTMFSender> = new Map();
 
-  // Event handlers
   private streamAvailableHandler?: { (event: RtcStream): void };
   private streamUnavailableHandler?: { (event: RtcStream): void };
   private readyHandler?: { (readyMetadata: ReadyMetadata): void };
@@ -456,7 +449,11 @@ export class BandwidthRtc {
     const publishOnTrackHandler = (event: RTCTrackEvent) => {
       logger.debug("publish ontrack event", event);
     };
-    this.publishingPeerConnection = await this.setupPeerConnection(PEER_CONNECTION_TYPE_PUBLISH, publishOnTrackHandler, setMediaPreferencesResponse.publishSdpOffer.sdpOffer);
+    this.publishingPeerConnection = await this.setupPeerConnection(
+      PEER_CONNECTION_TYPE_PUBLISH,
+      publishOnTrackHandler,
+      setMediaPreferencesResponse.publishSdpOffer.sdpOffer,
+    );
 
     let streamTracks: Map<MediaStream, Set<MediaStreamTrack>> = new Map();
 
@@ -531,23 +528,14 @@ export class BandwidthRtc {
     logger.debug("Setting up RTCPeerConnection");
     const peerConnection = this.createPeerConnection();
     this.setupNewPeerConnection(peerConnection, onTrack);
-    // Attempt to restart ice if connection fails
     peerConnection.onconnectionstatechange = async (event: Event) => {
       try {
         const pc = event.target as RTCPeerConnection;
-        let connectionState = pc.connectionState;
+        const connectionState = pc.connectionState;
         logger.debug("onconnectionstatechange", connectionState, pc);
         if (connectionState === CONNECTION_STATE_FAILED) {
           logger.warn("Connection failed, attempting to restart ICE TODO");
-          // await this.offerPublishSdp(true);
-          // connectionState = pc.connectionState;
-          // // TODO: add timeout so we dont loop here forever
-          // while (connectionState === "failed") {
-          //   await new Promise((resolve) => setTimeout(resolve, 5000));
-          //   // Don't block on this, we should try multiple times
-          //   this.offerPublishSdp(true);
-          //   connectionState = pc.connectionState;
-          // }
+          // TODO: add timeout here
         }
       } catch (err) {
         if (globalThis.window) {
@@ -555,7 +543,6 @@ export class BandwidthRtc {
         }
       }
     };
-    // Do an initial sdp negotiation
     logger.debug("Initial SDP offer", initialSdpOffer);
     if (initialSdpOffer != undefined) {
       logger.debug("Setting initial SDP offer", initialSdpOffer);
@@ -579,8 +566,6 @@ export class BandwidthRtc {
       const dataChannel: RTCDataChannel = event.channel;
       if (dataChannel.label === HEARTBEAT_DATA_CHANNEL_LABEL) {
         logger.info("Heartbeat Data Channel opened", dataChannel);
-
-        // Handle heartbeat messages
         dataChannel.onmessage = (event) => {
           logger.debug("Heartbeat Data Channel message", event.data);
           if (event.data == HEARTBEAT_PING && dataChannel.readyState === DATA_CHANNEL_STATE_OPEN) {
@@ -592,8 +577,7 @@ export class BandwidthRtc {
         logger.info("Diagnostics Data Channel opened", dataChannel);
       } else {
         logger.info("Custom Data Channel opened", dataChannel);
-        // // Custom data channel
-        // this.subscribedDataChannels.set(dataChannel.label, dataChannel);
+        // TODO: custom data channel
       }
     };
 
@@ -681,7 +665,9 @@ export class BandwidthRtc {
           // present so that RTCDTMFSender can send RFC 4733 DTMF packets.
           const hasTelephoneEvent = codecPreferences.audio.some((c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE);
           if (!hasTelephoneEvent) {
-            const telephoneEventCodec = RTCRtpSender.getCapabilities(TRACK_KIND_AUDIO)?.codecs.find((c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE);
+            const telephoneEventCodec = RTCRtpSender.getCapabilities(TRACK_KIND_AUDIO)?.codecs.find(
+              (c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE,
+            );
             transceiver.setCodecPreferences(telephoneEventCodec ? [...codecPreferences.audio, telephoneEventCodec] : codecPreferences.audio);
           } else {
             transceiver.setCodecPreferences(codecPreferences.audio);
