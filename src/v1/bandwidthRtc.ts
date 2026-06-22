@@ -117,17 +117,6 @@ export class BandwidthRtc {
     this.signaling.on("ready", this.handleReady.bind(this));
     this.signaling.on("sdpOffer", this.handleSubscribeSdpOffer.bind(this));
     this.signaling.on("init", this.init.bind(this));
-    this.signaling.on("streamAvailable", ({ callId, autoAccepted }: { callId: string; autoAccepted: boolean }) => {
-      if (this.streamAvailableHandler) {
-        this.streamAvailableHandler({ mediaTypes: [MediaType.AUDIO], callId, autoAccepted });
-      }
-    });
-    this.signaling.on("streamUnavailable", ({ callId }: { callId: string }) => {
-      if (this.streamUnavailableHandler) {
-        this.streamUnavailableHandler({ mediaTypes: [MediaType.AUDIO], callId });
-      }
-    });
-
     await this.signaling.connect(authParams, options);
     logger.info("Successfully connected");
   }
