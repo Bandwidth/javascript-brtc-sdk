@@ -352,7 +352,9 @@ export class BandwidthRtc {
 
   // Re-publishes the SDP with iceRestart=true to trigger ICE renegotiation after a connection failure.
   private async retryIceOnFailed(pc: RTCPeerConnection, shouldRetry: boolean): Promise<void> {
-    if (!shouldRetry) return;
+    if (!shouldRetry) {
+      return;
+    }
 
     const ICE_RESTART_TIMEOUT_MS = 30_000;
     const ICE_RESTART_RETRY_INTERVAL_MS = 5_000;
