@@ -54,6 +54,10 @@ const DATA_CHANNEL_STATE_OPEN = "open";
 const CONNECTION_STATE_FAILED = "failed";
 const CONNECTION_STATE_DISCONNECTED = "disconnected";
 
+// When true, automatically trigger an ICE restart (via offerPublishSdp(true)) on connection failure.
+// Disabled by default until the retry loop is production-hardened with a proper timeout/backoff.
+const RETRY_ICE_ON_FAILED = false;
+
 export class BandwidthRtc {
   private options?: RtcOptions;
 
@@ -346,6 +350,28 @@ export class BandwidthRtc {
     return this.signaling.hangupConnection(endpoint, type);
   }
 
+  // Re-publishes the SDP with iceRestart=true to trigger ICE renegotiation after a connection failure.
+  private async retryIceOnFailed(pc: RTCPeerConnection, shouldRetry: boolean): Promise<void> {
+    if (!shouldRetry) return;
+
+    const ICE_RESTART_TIMEOUT_MS = 30_000;
+    const ICE_RESTART_RETRY_INTERVAL_MS = 5_000;
+    const startTime = Date.now();
+
+    await this.offerPublishSdp(true);
+    let connectionState = pc.connectionState;
+    while (connectionState === CONNECTION_STATE_FAILED) {
+      if (Date.now() - startTime >= ICE_RESTART_TIMEOUT_MS) {
+        logger.warn("ICE restart timed out");
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ICE_RESTART_RETRY_INTERVAL_MS));
+      // Don't block on this, we should try multiple times
+      this.offerPublishSdp(true);
+      connectionState = pc.connectionState;
+    }
+  }
+
   private async offerPublishSdp(restartIce: boolean = false): Promise<SdpAnswer> {
     if (!this.publishingPeerConnection) {
       throw new BandwidthRtcError("No publishing RTCPeerConnection, cannot offer SDP");
@@ -523,8 +549,8 @@ export class BandwidthRtc {
         const connectionState = pc.connectionState;
         logger.debug("onconnectionstatechange", connectionState, pc);
         if (connectionState === CONNECTION_STATE_FAILED) {
-          logger.warn("Connection failed, attempting to restart ICE TODO");
-          // TODO: add timeout here
+          logger.warn("Connection failed, ICE restart required");
+          await this.retryIceOnFailed(pc, RETRY_ICE_ON_FAILED);
         }
       } catch (err) {
         if (globalThis.window) {
