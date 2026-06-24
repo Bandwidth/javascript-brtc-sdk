@@ -211,12 +211,12 @@ class BandwidthRtc {
     return devices;
   }
 
-  sendDtmf(tone: string, streamId?: string) {
+  sendDtmf(tone: string, streamId?: string, duration: number = 100, interToneGap: number = 70) {
     if (!this.delegate) {
       throw new BandwidthRtcError("You must call 'connect' before 'sendDtmf'");
     }
 
-    return this.delegate.sendDtmf(tone, streamId);
+    return this.delegate.sendDtmf(tone, streamId, duration, interToneGap);
   }
 
   /**
