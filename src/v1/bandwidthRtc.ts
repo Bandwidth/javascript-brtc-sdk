@@ -36,23 +36,38 @@ const RTC_CONFIGURATION: RTCConfiguration = {
   bundlePolicy: "max-bundle",
   rtcpMuxPolicy: "require",
 };
+
 const HEARTBEAT_DATA_CHANNEL_LABEL = "__heartbeat__";
 const DIAGNOSTICS_DATA_CHANNEL_LABEL = "__diagnostics__";
+
+const PEER_CONNECTION_TYPE_PUBLISH = "publish";
+const PEER_CONNECTION_TYPE_SUBSCRIBE = "subscribe";
+
+const TRACK_KIND_AUDIO = "audio";
+const TRACK_KIND_VIDEO = "video";
+const TELEPHONE_EVENT_MIME_TYPE = "audio/telephone-event";
+
+const HEARTBEAT_PING = "PING";
+const HEARTBEAT_PONG = "PONG";
+const DATA_CHANNEL_STATE_OPEN = "open";
+
+const CONNECTION_STATE_FAILED = "failed";
+const CONNECTION_STATE_DISCONNECTED = "disconnected";
+
+// When true, automatically trigger an ICE restart (via offerPublishSdp(true)) on connection failure.
+// Disabled by default until the retry loop is production-hardened with a proper timeout/backoff.
+const RETRY_ICE_ON_FAILED = false;
 
 export class BandwidthRtc {
   private options?: RtcOptions;
 
-  // Batches diagnostic data for debugging
   private diagnosticsBatcher: DiagnosticsBatcher;
-
-  // Communicates with the Bandwidth WebRTC platform
   private signaling: Signaling;
 
-  // One peer for all published (outgoing) streams, one for all subscribed (incoming) streams
+  // One peer connection for all published (outgoing) streams, one for all subscribed (incoming) streams
   private publishingPeerConnection?: RTCPeerConnection;
   private subscribingPeerConnection?: RTCPeerConnection;
 
-  // Standard datachannels used for platform diagnostics and health checks
   private publishHeartbeatDataChannel?: RTCDataChannel;
   private publishDiagnosticsDataChannel?: RTCDataChannel;
   private publishedDataChannels: Map<string, RTCDataChannel> = new Map();
@@ -64,17 +79,14 @@ export class BandwidthRtc {
   private publishMutex: Mutex = new Mutex();
   private subscribeMutex: Mutex = new Mutex();
 
-  // Lookup maps for streams, keyed by mediastream id (msid)
   private publishedStreams: Map<string, PublishedStream> = new Map();
   private subscribedStreams: Map<string, StreamMetadata> = new Map();
 
   // Current SDP revision for the subscribing peer; used to reject outdated SDP offers
   private subscribingPeerConnectionSdpRevision = 0;
 
-  // DTMF
   private localDtmfSenders: Map<string, RTCDTMFSender> = new Map();
 
-  // Event handlers
   private streamAvailableHandler?: { (event: RtcStream): void };
   private streamUnavailableHandler?: { (event: RtcStream): void };
   private readyHandler?: { (readyMetadata: ReadyMetadata): void };
@@ -308,15 +320,17 @@ export class BandwidthRtc {
   }
 
   /**
-   * DTMF Sender that layers DTMF tones onto an existing stream.
-   * @param tone The DTMF tones to send - a string composed of the characters [0-9,*,#,\,]*
-   * @param streamId The optional stream id to play on.
+   * Send DTMF tones via the browser's native RTCDTMFSender (RFC 4733).
+   * @param tone The DTMF tones to send - a string composed of the characters [0-9,*,#,A-D,\,]*
+   * @param streamId The optional stream id to send on; defaults to all published streams.
+   * @param duration Tone duration in milliseconds (default: 100). Must be between 40 and 6000.
+   * @param interToneGap Gap between tones in milliseconds (default: 70). Minimum 30.
    */
-  sendDtmf(tone: string, streamId?: string) {
+  sendDtmf(tone: string, streamId?: string, duration: number = 100, interToneGap: number = 70) {
     if (streamId) {
-      this.localDtmfSenders.get(streamId)?.insertDTMF(tone);
+      this.localDtmfSenders.get(streamId)?.insertDTMF(tone, duration, interToneGap);
     } else {
-      this.localDtmfSenders.forEach((dtmfSender) => dtmfSender.insertDTMF(tone));
+      this.localDtmfSenders.forEach((dtmfSender) => dtmfSender.insertDTMF(tone, duration, interToneGap));
     }
   }
 
@@ -379,6 +393,30 @@ export class BandwidthRtc {
     return this.signaling.declineStream(callId);
   }
 
+  // Re-publishes the SDP with iceRestart=true to trigger ICE renegotiation after a connection failure.
+  private async retryIceOnFailed(pc: RTCPeerConnection, shouldRetry: boolean): Promise<void> {
+    if (!shouldRetry) {
+      return;
+    }
+
+    const ICE_RESTART_TIMEOUT_MS = 30_000;
+    const ICE_RESTART_RETRY_INTERVAL_MS = 5_000;
+    const startTime = Date.now();
+
+    await this.offerPublishSdp(true);
+    let connectionState = pc.connectionState;
+    while (connectionState === CONNECTION_STATE_FAILED) {
+      if (Date.now() - startTime >= ICE_RESTART_TIMEOUT_MS) {
+        logger.warn("ICE restart timed out");
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ICE_RESTART_RETRY_INTERVAL_MS));
+      // Don't block on this, we should try multiple times
+      this.offerPublishSdp(true);
+      connectionState = pc.connectionState;
+    }
+  }
+
   private async offerPublishSdp(restartIce: boolean = false): Promise<SdpAnswer> {
     if (!this.publishingPeerConnection) {
       throw new BandwidthRtcError("No publishing RTCPeerConnection, cannot offer SDP");
@@ -408,7 +446,7 @@ export class BandwidthRtc {
         ),
       );
       logger.debug("publish metadata", publishMetadata);
-      const remoteSdpAnswer = await this.signaling.offerSdp("publish", localSdpOffer.sdp!);
+      const remoteSdpAnswer = await this.signaling.offerSdp(PEER_CONNECTION_TYPE_PUBLISH, localSdpOffer.sdp!);
 
       await this.publishingPeerConnection!.setLocalDescription(localSdpOffer);
       logger.debug("remoteSdpAnswer", remoteSdpAnswer);
@@ -456,7 +494,7 @@ export class BandwidthRtc {
         }
 
         await this.subscribingPeerConnection!.setLocalDescription(localSdpAnswer);
-        await this.signaling.answerSdp(localSdpAnswer.sdp, "subscribe");
+        await this.signaling.answerSdp(localSdpAnswer.sdp, PEER_CONNECTION_TYPE_SUBSCRIBE);
 
         this.subscribingPeerConnectionSdpRevision = subscribeSdpOffer.sdpRevision;
         logger.debug(`set current SDP revision to ${this.subscribingPeerConnectionSdpRevision}`);
@@ -471,7 +509,11 @@ export class BandwidthRtc {
     const publishOnTrackHandler = (event: RTCTrackEvent) => {
       logger.debug("publish ontrack event", event);
     };
-    this.publishingPeerConnection = await this.setupPeerConnection("publish", publishOnTrackHandler, setMediaPreferencesResponse.publishSdpOffer.sdpOffer);
+    this.publishingPeerConnection = await this.setupPeerConnection(
+      PEER_CONNECTION_TYPE_PUBLISH,
+      publishOnTrackHandler,
+      setMediaPreferencesResponse.publishSdpOffer.sdpOffer,
+    );
 
     let streamTracks: Map<MediaStream, Set<MediaStreamTrack>> = new Map();
 
@@ -547,7 +589,7 @@ export class BandwidthRtc {
       }
     };
     this.subscribingPeerConnection = await this.setupPeerConnection(
-      "subscribe",
+      PEER_CONNECTION_TYPE_SUBSCRIBE,
       subscriptionOnTrackHandler,
       setMediaPreferencesResponse.subscribeSdpOffer.sdpOffer,
     );
@@ -561,23 +603,14 @@ export class BandwidthRtc {
     logger.debug("Setting up RTCPeerConnection");
     const peerConnection = this.createPeerConnection();
     this.setupNewPeerConnection(peerConnection, onTrack);
-    // Attempt to restart ice if connection fails
     peerConnection.onconnectionstatechange = async (event: Event) => {
       try {
         const pc = event.target as RTCPeerConnection;
-        let connectionState = pc.connectionState;
+        const connectionState = pc.connectionState;
         logger.debug("onconnectionstatechange", connectionState, pc);
-        if (connectionState === "failed") {
-          logger.warn("Connection failed, attempting to restart ICE TODO");
-          // await this.offerPublishSdp(true);
-          // connectionState = pc.connectionState;
-          // // TODO: add timeout so we dont loop here forever
-          // while (connectionState === "failed") {
-          //   await new Promise((resolve) => setTimeout(resolve, 5000));
-          //   // Don't block on this, we should try multiple times
-          //   this.offerPublishSdp(true);
-          //   connectionState = pc.connectionState;
-          // }
+        if (connectionState === CONNECTION_STATE_FAILED) {
+          logger.warn("Connection failed, ICE restart required");
+          await this.retryIceOnFailed(pc, RETRY_ICE_ON_FAILED);
         }
       } catch (err) {
         if (globalThis.window) {
@@ -585,7 +618,6 @@ export class BandwidthRtc {
         }
       }
     };
-    // Do an initial sdp negotiation
     logger.debug("Initial SDP offer", initialSdpOffer);
     if (initialSdpOffer != undefined) {
       logger.debug("Setting initial SDP offer", initialSdpOffer);
@@ -609,21 +641,18 @@ export class BandwidthRtc {
       const dataChannel: RTCDataChannel = event.channel;
       if (dataChannel.label === HEARTBEAT_DATA_CHANNEL_LABEL) {
         logger.info("Heartbeat Data Channel opened", dataChannel);
-
-        // Handle heartbeat messages
         dataChannel.onmessage = (event) => {
           logger.debug("Heartbeat Data Channel message", event.data);
-          if (event.data == "PING" && dataChannel.readyState === "open") {
+          if (event.data == HEARTBEAT_PING && dataChannel.readyState === DATA_CHANNEL_STATE_OPEN) {
             logger.debug("Received PING, sending PONG");
-            dataChannel.send("PONG");
+            dataChannel.send(HEARTBEAT_PONG);
           }
         };
       } else if (dataChannel.label === DIAGNOSTICS_DATA_CHANNEL_LABEL) {
         logger.info("Diagnostics Data Channel opened", dataChannel);
       } else {
         logger.info("Custom Data Channel opened", dataChannel);
-        // // Custom data channel
-        // this.subscribedDataChannels.set(dataChannel.label, dataChannel);
+        // TODO: custom data channel
       }
     };
 
@@ -632,7 +661,7 @@ export class BandwidthRtc {
         const pc = event.target as RTCPeerConnection;
         logger.debug("onconnectionstatechange", pc.connectionState, pc);
         const connectionState = pc.connectionState;
-        if (connectionState === "disconnected") {
+        if (connectionState === CONNECTION_STATE_DISCONNECTED) {
           logger.warn("Peer disconnected, connection may be reestablished");
         }
       } catch (err) {
@@ -696,15 +725,29 @@ export class BandwidthRtc {
         streams: [mediaStream],
       });
 
-      // Inject DTMF into one audio track in the stream
-      if (track.kind === "audio" && !this.localDtmfSenders.has(mediaStream.id)) {
-        this.localDtmfSenders.set(mediaStream.id, transceiver.sender.dtmf!);
+      // Inject DTMF into one audio track in the stream via the browser's native
+      // RTCDTMFSender. rtpSender.dtmf can be null when the browser doesn't
+      // support DTMF for this track, so guard before storing.
+      const dtmfSender = transceiver.sender.dtmf;
+      if (track.kind === TRACK_KIND_AUDIO && dtmfSender && !this.localDtmfSenders.has(mediaStream.id)) {
+        this.localDtmfSenders.set(mediaStream.id, dtmfSender);
       }
 
       if (codecPreferences) {
-        if (track.kind === "audio" && codecPreferences.audio) {
-          transceiver.setCodecPreferences(codecPreferences.audio);
-        } else if (track.kind === "video" && codecPreferences.video) {
+        if (track.kind === TRACK_KIND_AUDIO && codecPreferences.audio) {
+          // setCodecPreferences is a strict allowlist: any codec omitted from the
+          // list is dropped from the SDP offer. telephone-event must always be
+          // present so that RTCDTMFSender can send RFC 4733 DTMF packets.
+          const hasTelephoneEvent = codecPreferences.audio.some((c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE);
+          if (!hasTelephoneEvent) {
+            const telephoneEventCodec = RTCRtpSender.getCapabilities(TRACK_KIND_AUDIO)?.codecs.find(
+              (c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE,
+            );
+            transceiver.setCodecPreferences(telephoneEventCodec ? [...codecPreferences.audio, telephoneEventCodec] : codecPreferences.audio);
+          } else {
+            transceiver.setCodecPreferences(codecPreferences.audio);
+          }
+        } else if (track.kind === TRACK_KIND_VIDEO && codecPreferences.video) {
           transceiver.setCodecPreferences(codecPreferences.video);
         }
       }

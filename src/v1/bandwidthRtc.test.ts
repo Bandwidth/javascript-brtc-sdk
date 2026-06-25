@@ -55,6 +55,144 @@ describe("bandwidhthRtcV1 constructor", () => {
   });
 });
 
+describe("bandwidthRtcV1 sendDtmf", () => {
+  beforeAll(() => {
+    setupNavigatorMocks();
+    setupMocks();
+  });
+
+  function makeDtmfSender() {
+    return { insertDTMF: jest.fn() };
+  }
+
+  test("calls insertDTMF on all registered senders when no streamId given", () => {
+    const brtc = new BandwidthRtc();
+    const sender1 = makeDtmfSender();
+    const sender2 = makeDtmfSender();
+    (brtc as any).localDtmfSenders.set("stream-1", sender1);
+    (brtc as any).localDtmfSenders.set("stream-2", sender2);
+
+    brtc.sendDtmf("5");
+
+    expect(sender1.insertDTMF).toHaveBeenCalledTimes(1);
+    expect(sender1.insertDTMF).toHaveBeenCalledWith("5", 100, 70);
+    expect(sender2.insertDTMF).toHaveBeenCalledTimes(1);
+    expect(sender2.insertDTMF).toHaveBeenCalledWith("5", 100, 70);
+  });
+
+  test("calls insertDTMF only on the specified stream when streamId given", () => {
+    const brtc = new BandwidthRtc();
+    const sender1 = makeDtmfSender();
+    const sender2 = makeDtmfSender();
+    (brtc as any).localDtmfSenders.set("stream-1", sender1);
+    (brtc as any).localDtmfSenders.set("stream-2", sender2);
+
+    brtc.sendDtmf("9", "stream-1");
+
+    expect(sender1.insertDTMF).toHaveBeenCalledTimes(1);
+    expect(sender2.insertDTMF).not.toHaveBeenCalled();
+  });
+
+  test("forwards duration and interToneGap to insertDTMF", () => {
+    const brtc = new BandwidthRtc();
+    const sender = makeDtmfSender();
+    (brtc as any).localDtmfSenders.set("stream-1", sender);
+
+    brtc.sendDtmf("1", undefined, 200, 80);
+
+    expect(sender.insertDTMF).toHaveBeenCalledWith("1", 200, 80);
+  });
+
+  test("does not throw when no senders are registered", () => {
+    const brtc = new BandwidthRtc();
+    expect(() => brtc.sendDtmf("5")).not.toThrow();
+  });
+
+  test("does nothing for an unknown streamId", () => {
+    const brtc = new BandwidthRtc();
+    const sender = makeDtmfSender();
+    (brtc as any).localDtmfSenders.set("stream-1", sender);
+
+    brtc.sendDtmf("5", "nonexistent");
+
+    expect(sender.insertDTMF).not.toHaveBeenCalled();
+  });
+});
+
+describe("bandwidthRtcV1 addStreamToPublishingPeerConnection", () => {
+  function makeTransceiver(dtmf: RTCDTMFSender | null = { insertDTMF: jest.fn() } as any) {
+    return { sender: { dtmf }, setCodecPreferences: jest.fn() };
+  }
+
+  function makeMockStream(id: string, trackKind: string) {
+    return { id, getTracks: () => [{ kind: trackKind, id: "track-1" }] };
+  }
+
+  function withPublishingPeerConnection(brtc: BandwidthRtc, transceiver: ReturnType<typeof makeTransceiver>) {
+    (brtc as any).publishingPeerConnection = { addTransceiver: jest.fn().mockReturnValue(transceiver) };
+  }
+
+  test("stores dtmf sender for audio track", () => {
+    const brtc = new BandwidthRtc();
+    const dtmfSender = { insertDTMF: jest.fn() };
+    const transceiver = makeTransceiver(dtmfSender as any);
+    withPublishingPeerConnection(brtc, transceiver);
+
+    (brtc as any).addStreamToPublishingPeerConnection(makeMockStream("stream-1", "audio"));
+
+    expect((brtc as any).localDtmfSenders.get("stream-1")).toBe(dtmfSender);
+  });
+
+  test("does not store dtmf sender when sender.dtmf is null", () => {
+    const brtc = new BandwidthRtc();
+    withPublishingPeerConnection(brtc, makeTransceiver(null));
+
+    (brtc as any).addStreamToPublishingPeerConnection(makeMockStream("stream-1", "audio"));
+
+    expect((brtc as any).localDtmfSenders.has("stream-1")).toBe(false);
+  });
+
+  test("appends telephone-event codec when missing from audio preferences", () => {
+    const brtc = new BandwidthRtc();
+    const transceiver = makeTransceiver();
+    withPublishingPeerConnection(brtc, transceiver);
+
+    const telephoneEventCodec = { mimeType: "audio/telephone-event", clockRate: 8000 };
+    (global as any).RTCRtpSender = { getCapabilities: jest.fn().mockReturnValue({ codecs: [telephoneEventCodec] }) };
+
+    const opusCodec = { mimeType: "audio/opus", clockRate: 48000 };
+    (brtc as any).addStreamToPublishingPeerConnection(makeMockStream("stream-1", "audio"), { audio: [opusCodec] });
+
+    expect(transceiver.setCodecPreferences).toHaveBeenCalledWith([opusCodec, telephoneEventCodec]);
+  });
+
+  test("does not duplicate telephone-event when already in preferences", () => {
+    const brtc = new BandwidthRtc();
+    const transceiver = makeTransceiver();
+    withPublishingPeerConnection(brtc, transceiver);
+
+    const opusCodec = { mimeType: "audio/opus", clockRate: 48000 };
+    const telephoneEventCodec = { mimeType: "audio/telephone-event", clockRate: 8000 };
+    (brtc as any).addStreamToPublishingPeerConnection(makeMockStream("stream-1", "audio"), { audio: [opusCodec, telephoneEventCodec] });
+
+    expect(transceiver.setCodecPreferences).toHaveBeenCalledWith([opusCodec, telephoneEventCodec]);
+    expect(transceiver.setCodecPreferences).toHaveBeenCalledTimes(1);
+  });
+
+  test("falls back to original preferences when telephone-event not found in capabilities", () => {
+    const brtc = new BandwidthRtc();
+    const transceiver = makeTransceiver();
+    withPublishingPeerConnection(brtc, transceiver);
+
+    (global as any).RTCRtpSender = { getCapabilities: jest.fn().mockReturnValue({ codecs: [] }) };
+
+    const opusCodec = { mimeType: "audio/opus", clockRate: 48000 };
+    (brtc as any).addStreamToPublishingPeerConnection(makeMockStream("stream-1", "audio"), { audio: [opusCodec] });
+
+    expect(transceiver.setCodecPreferences).toHaveBeenCalledWith([opusCodec]);
+  });
+});
+
 describe("bandwidthRtcV1 connect method", () => {
   beforeAll(() => {
     setupNavigatorMocks();
