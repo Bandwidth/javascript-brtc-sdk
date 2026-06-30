@@ -131,6 +131,7 @@ export class BandwidthRtc {
     this.signaling.on("init", this.init.bind(this));
     this.signaling.on("streamAvailable", ({ callId, autoAccepted }: { callId: string; autoAccepted: boolean }) => {
       if (this.pendingSubscribeStream) {
+        // ontrack already fired at connect time — fire the combined event now.
         this.callIsActive = true;
         this.streamAvailableHandler?.({
           mediaTypes: [MediaType.AUDIO],
@@ -139,7 +140,7 @@ export class BandwidthRtc {
           autoAccepted,
         });
       } else {
-        // ontrack hasn't fired yet — store and fire once it does
+        // ontrack hasn't fired yet — store and fire once it does.
         this.pendingCallInfo = { callId, autoAccepted };
       }
     });
@@ -151,7 +152,7 @@ export class BandwidthRtc {
       this.pendingCallInfo = undefined;
       this.streamUnavailableHandler?.({
         mediaTypes: [MediaType.AUDIO],
-        mediaStream: this.pendingSubscribeStream,
+        mediaStream: this.pendingSubscribeStream!,
         callId,
       });
     });
@@ -527,6 +528,17 @@ export class BandwidthRtc {
 
       track.onunmute = (event) => {
         logger.debug("onunmute", event.target);
+        // Fallback for gateways that don't send WS streamAvailable: fire
+        // onStreamAvailable when audio actually starts flowing. No-op on new
+        // gateways because callIsActive is already true from the WS event.
+        if (!this.callIsActive && this.pendingSubscribeStream) {
+          this.callIsActive = true;
+          logger.debug("onStreamAvailable (onunmute fallback)", this.pendingSubscribeStream.id);
+          this.streamAvailableHandler?.({
+            mediaTypes: [MediaType.AUDIO],
+            mediaStream: this.pendingSubscribeStream,
+          });
+        }
       };
 
       track.onended = (event) => {
@@ -567,24 +579,19 @@ export class BandwidthRtc {
           }
         };
 
-        // Store the subscribe stream. We fire onStreamAvailable only when the WS
-        // streamAvailable notification arrives (which carries callId/autoAccepted), so
-        // that customers always receive a single event with mediaStream set. If the WS
-        // notification already arrived before ontrack, fire the combined event now.
         this.pendingSubscribeStream = stream;
         if (this.pendingCallInfo) {
+          // WS arrived before ontrack — fire the combined event now.
           const { callId, autoAccepted } = this.pendingCallInfo;
           this.pendingCallInfo = undefined;
           this.callIsActive = true;
-          logger.debug("onStreamAvailable (deferred)", stream.id);
+          logger.debug("onStreamAvailable (WS-enriched)", stream.id);
           this.streamAvailableHandler?.({
             mediaTypes: [MediaType.AUDIO],
             mediaStream: stream,
             callId,
             autoAccepted,
           });
-        } else {
-          logger.debug("ontrack: stored subscribe stream, waiting for WS streamAvailable", stream.id);
         }
       }
     };
