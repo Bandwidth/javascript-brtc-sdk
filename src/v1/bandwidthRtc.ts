@@ -292,10 +292,27 @@ export class BandwidthRtc {
    * @param interToneGap Gap between tones in milliseconds (default: 70). Minimum 30.
    */
   sendDtmf(tone: string, streamId?: string, duration: number = 100, interToneGap: number = 70) {
+    const insert = (dtmfSender: RTCDTMFSender, id: string) => {
+      if (!dtmfSender.canInsertDTMF) {
+        logger.warn(`sendDtmf: DTMF sender for stream ${id} is not ready (canInsertDTMF is false); skipping`);
+        return;
+      }
+      try {
+        dtmfSender.insertDTMF(tone, duration, interToneGap);
+      } catch (err) {
+        logger.warn(`sendDtmf: insertDTMF failed for stream ${id}`, err);
+      }
+    };
+
     if (streamId) {
-      this.localDtmfSenders.get(streamId)?.insertDTMF(tone, duration, interToneGap);
+      const dtmfSender = this.localDtmfSenders.get(streamId);
+      if (dtmfSender) {
+        insert(dtmfSender, streamId);
+      } else {
+        logger.warn(`sendDtmf: no DTMF sender registered for stream ${streamId}`);
+      }
     } else {
-      this.localDtmfSenders.forEach((dtmfSender) => dtmfSender.insertDTMF(tone, duration, interToneGap));
+      this.localDtmfSenders.forEach(insert);
     }
   }
 
@@ -385,6 +402,12 @@ export class BandwidthRtc {
         offerToReceiveAudio: false,
         iceRestart: restartIce,
       });
+
+      // Diagnostic only: if an audio m-line is offered without telephone-event, DTMF
+      // can never negotiate for this session regardless of how long sendDtmf waits.
+      if (localSdpOffer.sdp?.includes("m=audio") && !localSdpOffer.sdp.includes(TELEPHONE_EVENT_MIME_TYPE.split("/")[1])) {
+        logger.warn("Publish SDP offer has an audio track but no telephone-event codec; DTMF will not be able to negotiate for this session");
+      }
 
       let publishMetadata = {
         mediaStreams: {},
@@ -675,23 +698,24 @@ export class BandwidthRtc {
         this.localDtmfSenders.set(mediaStream.id, dtmfSender);
       }
 
-      if (codecPreferences) {
-        if (track.kind === TRACK_KIND_AUDIO && codecPreferences.audio) {
-          // setCodecPreferences is a strict allowlist: any codec omitted from the
-          // list is dropped from the SDP offer. telephone-event must always be
-          // present so that RTCDTMFSender can send RFC 4733 DTMF packets.
-          const hasTelephoneEvent = codecPreferences.audio.some((c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE);
+      if (track.kind === TRACK_KIND_AUDIO) {
+        // setCodecPreferences is a strict allowlist: any codec omitted from the list is
+        // dropped from the SDP offer. Apply it unconditionally (not just when the caller
+        // passes codecPreferences) so telephone-event is always present and RTCDTMFSender
+        // can send RFC 4733 DTMF packets, regardless of the browser's default codec offer.
+        const audioCapabilities = typeof RTCRtpSender !== "undefined" ? RTCRtpSender.getCapabilities(TRACK_KIND_AUDIO) : undefined;
+        const audioCodecs = codecPreferences?.audio ?? audioCapabilities?.codecs;
+        if (audioCodecs) {
+          const hasTelephoneEvent = audioCodecs.some((c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE);
           if (!hasTelephoneEvent) {
-            const telephoneEventCodec = RTCRtpSender.getCapabilities(TRACK_KIND_AUDIO)?.codecs.find(
-              (c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE,
-            );
-            transceiver.setCodecPreferences(telephoneEventCodec ? [...codecPreferences.audio, telephoneEventCodec] : codecPreferences.audio);
+            const telephoneEventCodec = audioCapabilities?.codecs.find((c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE);
+            transceiver.setCodecPreferences(telephoneEventCodec ? [...audioCodecs, telephoneEventCodec] : audioCodecs);
           } else {
-            transceiver.setCodecPreferences(codecPreferences.audio);
+            transceiver.setCodecPreferences(audioCodecs);
           }
-        } else if (track.kind === TRACK_KIND_VIDEO && codecPreferences.video) {
-          transceiver.setCodecPreferences(codecPreferences.video);
         }
+      } else if (track.kind === TRACK_KIND_VIDEO && codecPreferences?.video) {
+        transceiver.setCodecPreferences(codecPreferences.video);
       }
     });
   }

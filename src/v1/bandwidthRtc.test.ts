@@ -61,8 +61,8 @@ describe("bandwidthRtcV1 sendDtmf", () => {
     setupMocks();
   });
 
-  function makeDtmfSender() {
-    return { insertDTMF: jest.fn() };
+  function makeDtmfSender(canInsertDTMF: boolean = true) {
+    return { insertDTMF: jest.fn(), canInsertDTMF };
   }
 
   test("calls insertDTMF on all registered senders when no streamId given", () => {
@@ -117,9 +117,41 @@ describe("bandwidthRtcV1 sendDtmf", () => {
 
     expect(sender.insertDTMF).not.toHaveBeenCalled();
   });
+
+  test("skips a sender that is not ready (canInsertDTMF false) without throwing", () => {
+    const brtc = new BandwidthRtc();
+    const notReady = makeDtmfSender(false);
+    const ready = makeDtmfSender(true);
+    (brtc as any).localDtmfSenders.set("stream-1", notReady);
+    (brtc as any).localDtmfSenders.set("stream-2", ready);
+
+    expect(() => brtc.sendDtmf("5")).not.toThrow();
+
+    expect(notReady.insertDTMF).not.toHaveBeenCalled();
+    expect(ready.insertDTMF).toHaveBeenCalledWith("5", 100, 70);
+  });
+
+  test("catches an insertDTMF error on one sender and still calls the others", () => {
+    const brtc = new BandwidthRtc();
+    const throwing = makeDtmfSender();
+    throwing.insertDTMF.mockImplementation(() => {
+      throw new DOMException("not ready", "InvalidStateError");
+    });
+    const healthy = makeDtmfSender();
+    (brtc as any).localDtmfSenders.set("stream-1", throwing);
+    (brtc as any).localDtmfSenders.set("stream-2", healthy);
+
+    expect(() => brtc.sendDtmf("5")).not.toThrow();
+
+    expect(healthy.insertDTMF).toHaveBeenCalledWith("5", 100, 70);
+  });
 });
 
 describe("bandwidthRtcV1 addStreamToPublishingPeerConnection", () => {
+  afterEach(() => {
+    delete (global as any).RTCRtpSender;
+  });
+
   function makeTransceiver(dtmf: RTCDTMFSender | null = { insertDTMF: jest.fn() } as any) {
     return { sender: { dtmf }, setCodecPreferences: jest.fn() };
   }
@@ -190,6 +222,30 @@ describe("bandwidthRtcV1 addStreamToPublishingPeerConnection", () => {
     (brtc as any).addStreamToPublishingPeerConnection(makeMockStream("stream-1", "audio"), { audio: [opusCodec] });
 
     expect(transceiver.setCodecPreferences).toHaveBeenCalledWith([opusCodec]);
+  });
+
+  test("forces telephone-event into codec preferences even without explicit codecPreferences", () => {
+    const brtc = new BandwidthRtc();
+    const transceiver = makeTransceiver();
+    withPublishingPeerConnection(brtc, transceiver);
+
+    const opusCodec = { mimeType: "audio/opus", clockRate: 48000 };
+    const telephoneEventCodec = { mimeType: "audio/telephone-event", clockRate: 8000 };
+    (global as any).RTCRtpSender = { getCapabilities: jest.fn().mockReturnValue({ codecs: [opusCodec, telephoneEventCodec] }) };
+
+    (brtc as any).addStreamToPublishingPeerConnection(makeMockStream("stream-1", "audio"));
+
+    expect(transceiver.setCodecPreferences).toHaveBeenCalledWith([opusCodec, telephoneEventCodec]);
+  });
+
+  test("skips setCodecPreferences when RTCRtpSender is unavailable (e.g. non-browser environment)", () => {
+    const brtc = new BandwidthRtc();
+    const transceiver = makeTransceiver();
+    withPublishingPeerConnection(brtc, transceiver);
+
+    expect(() => (brtc as any).addStreamToPublishingPeerConnection(makeMockStream("stream-1", "audio"))).not.toThrow();
+
+    expect(transceiver.setCodecPreferences).not.toHaveBeenCalled();
   });
 });
 
