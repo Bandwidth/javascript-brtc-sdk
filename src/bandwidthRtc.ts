@@ -211,7 +211,15 @@ class BandwidthRtc {
     return devices;
   }
 
-  sendDtmf(tone: string, streamId?: string, duration: number = 100, interToneGap: number = 70) {
+  /**
+   * Send DTMF tones on published audio streams via the browser's native RTCDTMFSender (RFC 4733).
+   * @param tone The DTMF tones to send - a string composed of the characters [0-9,*,#,A-D,\,]*
+   * @param streamId The optional stream id to send on; defaults to all published streams.
+   * @param duration Tone duration in milliseconds (default: 100). Must be between 40 and 6000.
+   * @param interToneGap Gap between tones in milliseconds (default: 70). Minimum 30.
+   * @returns true if the tones were queued on at least one stream, false otherwise
+   */
+  sendDtmf(tone: string, streamId?: string, duration: number = 100, interToneGap: number = 70): boolean {
     if (!this.delegate) {
       throw new BandwidthRtcError("You must call 'connect' before 'sendDtmf'");
     }

@@ -290,30 +290,42 @@ export class BandwidthRtc {
    * @param streamId The optional stream id to send on; defaults to all published streams.
    * @param duration Tone duration in milliseconds (default: 100). Must be between 40 and 6000.
    * @param interToneGap Gap between tones in milliseconds (default: 70). Minimum 30.
+   * @returns true if the tones were queued on at least one stream, false otherwise
    */
-  sendDtmf(tone: string, streamId?: string, duration: number = 100, interToneGap: number = 70) {
-    const insert = (dtmfSender: RTCDTMFSender, id: string) => {
+  sendDtmf(tone: string, streamId?: string, duration: number = 100, interToneGap: number = 70): boolean {
+    const insert = (dtmfSender: RTCDTMFSender, id: string): boolean => {
       if (!dtmfSender.canInsertDTMF) {
         logger.warn(`sendDtmf: DTMF sender for stream ${id} is not ready (canInsertDTMF is false); skipping`);
-        return;
+        return false;
       }
       try {
         dtmfSender.insertDTMF(tone, duration, interToneGap);
+        return true;
       } catch (err) {
         logger.warn(`sendDtmf: insertDTMF failed for stream ${id}`, err);
+        return false;
       }
     };
 
     if (streamId) {
       const dtmfSender = this.localDtmfSenders.get(streamId);
       if (dtmfSender) {
-        insert(dtmfSender, streamId);
-      } else {
-        logger.warn(`sendDtmf: no DTMF sender registered for stream ${streamId}`);
+        return insert(dtmfSender, streamId);
       }
-    } else {
-      this.localDtmfSenders.forEach(insert);
+      logger.warn(`sendDtmf: no DTMF sender registered for stream ${streamId}`);
+      return false;
     }
+
+    if (this.localDtmfSenders.size === 0) {
+      logger.warn("sendDtmf: no DTMF senders registered; has an audio stream been published?");
+      return false;
+    }
+
+    let sent = false;
+    this.localDtmfSenders.forEach((dtmfSender, id) => {
+      sent = insert(dtmfSender, id) || sent;
+    });
+    return sent;
   }
 
   /**
@@ -698,26 +710,77 @@ export class BandwidthRtc {
         this.localDtmfSenders.set(mediaStream.id, dtmfSender);
       }
 
-      if (track.kind === TRACK_KIND_AUDIO) {
-        // setCodecPreferences is a strict allowlist: any codec omitted from the list is
-        // dropped from the SDP offer. Apply it unconditionally (not just when the caller
-        // passes codecPreferences) so telephone-event is always present and RTCDTMFSender
-        // can send RFC 4733 DTMF packets, regardless of the browser's default codec offer.
-        const audioCapabilities = typeof RTCRtpSender !== "undefined" ? RTCRtpSender.getCapabilities(TRACK_KIND_AUDIO) : undefined;
-        const audioCodecs = codecPreferences?.audio ?? audioCapabilities?.codecs;
-        if (audioCodecs) {
-          const hasTelephoneEvent = audioCodecs.some((c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE);
-          if (!hasTelephoneEvent) {
-            const telephoneEventCodec = audioCapabilities?.codecs.find((c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE);
-            transceiver.setCodecPreferences(telephoneEventCodec ? [...audioCodecs, telephoneEventCodec] : audioCodecs);
-          } else {
-            transceiver.setCodecPreferences(audioCodecs);
-          }
-        }
+      // Only restrict codecs when the caller explicitly asks for it. Every browser
+      // that supports RTCDTMFSender already includes telephone-event in its default
+      // audio offer, and setCodecPreferences behaves very differently across WebKit
+      // versions (throwing on some, silently dropping codecs on others), so touching
+      // it in the default path only adds risk.
+      if (track.kind === TRACK_KIND_AUDIO && codecPreferences?.audio) {
+        this.applyAudioCodecPreferences(transceiver, codecPreferences.audio);
       } else if (track.kind === TRACK_KIND_VIDEO && codecPreferences?.video) {
-        transceiver.setCodecPreferences(codecPreferences.video);
+        this.trySetCodecPreferences(transceiver, codecPreferences.video, TRACK_KIND_VIDEO);
       }
     });
+  }
+
+  /**
+   * Apply caller-provided audio codec preferences, keeping telephone-event in the
+   * list so RTCDTMFSender can negotiate RFC 4733 DTMF. setCodecPreferences is a
+   * strict allowlist: any codec omitted from the list is dropped from the SDP offer.
+   */
+  private applyAudioCodecPreferences(transceiver: RTCRtpTransceiver, audioCodecs: RTCRtpCodec[]) {
+    const hasTelephoneEvent = audioCodecs.some((c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE);
+    if (!hasTelephoneEvent) {
+      const telephoneEventCodec = this.findTelephoneEventCodec();
+      if (telephoneEventCodec) {
+        if (this.trySetCodecPreferences(transceiver, [...audioCodecs, telephoneEventCodec], TRACK_KIND_AUDIO)) {
+          return;
+        }
+      } else {
+        logger.warn(
+          "telephone-event codec not found in this browser's capabilities; applying audio codec preferences as-is, DTMF may not be able to negotiate",
+        );
+      }
+    }
+    this.trySetCodecPreferences(transceiver, audioCodecs, TRACK_KIND_AUDIO);
+  }
+
+  /**
+   * Per the WebRTC spec, codecs passed to setCodecPreferences must come from the
+   * receiver's capabilities; older engines matched against the sender's, so check both.
+   */
+  private findTelephoneEventCodec(): RTCRtpCodec | undefined {
+    const capabilityCodecs = [
+      typeof RTCRtpReceiver !== "undefined" && typeof RTCRtpReceiver.getCapabilities === "function"
+        ? RTCRtpReceiver.getCapabilities(TRACK_KIND_AUDIO)?.codecs
+        : undefined,
+      typeof RTCRtpSender !== "undefined" && typeof RTCRtpSender.getCapabilities === "function"
+        ? RTCRtpSender.getCapabilities(TRACK_KIND_AUDIO)?.codecs
+        : undefined,
+    ];
+    for (const codecs of capabilityCodecs) {
+      const telephoneEventCodec = codecs?.find((c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE);
+      if (telephoneEventCodec) {
+        return telephoneEventCodec;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * setCodecPreferences must never break publishing: WebKit's matching rules vary
+   * by version (case sensitivity, receiver-only capability matching, strict
+   * sdpFmtpLine parsing) and a failure here just means the browser's default codec
+   * offer is used instead.
+   */
+  private trySetCodecPreferences(transceiver: RTCRtpTransceiver, codecs: RTCRtpCodec[], kind: string): boolean {
+    try {
+      transceiver.setCodecPreferences(codecs);
+      return true;
+    } catch (err) {
+      logger.warn(`setCodecPreferences failed for ${kind} track; falling back to browser default codecs`, err);
+      return false;
+    }
   }
 
   private cleanupPublishedStreams(...streams: PublishedStream[]) {

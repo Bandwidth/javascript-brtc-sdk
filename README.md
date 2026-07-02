@@ -89,6 +89,7 @@ Please see the following resources for more information on MediaStreamConstraint
   - streamId (optional): the stream to send the tone on; defaults to all published streams
   - duration (optional): tone duration in milliseconds, between 40 and 6000 (default: 100)
   - interToneGap (optional): gap between tones in milliseconds, minimum 30 (default: 70)
+- Returns: `true` if the tones were queued on at least one stream, `false` otherwise (e.g. no audio stream published yet, or the telephone-event codec has not been negotiated)
 
 ```javascript
 bandwidthRtc.sendDtmf("3");
