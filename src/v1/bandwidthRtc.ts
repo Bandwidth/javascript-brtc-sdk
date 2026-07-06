@@ -91,12 +91,15 @@ export class BandwidthRtc {
   private streamUnavailableHandler?: { (event: RtcStream): void };
   private readyHandler?: { (readyMetadata: ReadyMetadata): void };
 
-  // Pending state for correlating WebRTC ontrack with WS streamAvailable notification.
-  // ontrack fires at connect time; the WS notification fires when a call actually arrives.
-  // We hold both until we have each, then fire a single combined onStreamAvailable event.
+  // Pending state for correlating the per-call WebRTC ontrack with the WS
+  // streamAvailable notification. The gateway negotiates a fresh subscribe track
+  // per call (ontrack) and sends a WS streamAvailable carrying callId/autoAccepted;
+  // we hold whichever arrives first and fire a single combined onStreamAvailable
+  // once we have both. Both are cleared at call end so the next call starts clean.
   private pendingSubscribeStream: MediaStream | undefined;
   private pendingCallInfo: { callId: string; autoAccepted: boolean } | undefined;
-  // Prevents double-firing onStreamUnavailable when both WS and onremovetrack fire.
+  // Ensures onStreamAvailable/onStreamUnavailable each fire exactly once per call
+  // across the WS, ontrack, onunmute, and onremovetrack paths.
   private callIsActive = false;
 
   /**
@@ -130,8 +133,13 @@ export class BandwidthRtc {
     this.signaling.on("sdpOffer", this.handleSubscribeSdpOffer.bind(this));
     this.signaling.on("init", this.init.bind(this));
     this.signaling.on("streamAvailable", ({ callId, autoAccepted }: { callId: string; autoAccepted: boolean }) => {
+      if (this.callIsActive) {
+        // Already fired for this call (e.g. via the onunmute fallback). Don't
+        // double-fire; the metadata-bearing path just loses the race here.
+        return;
+      }
       if (this.pendingSubscribeStream) {
-        // ontrack already fired at connect time — fire the combined event now.
+        // ontrack for this call already fired — fire the combined event now.
         this.callIsActive = true;
         this.streamAvailableHandler?.({
           mediaTypes: [MediaType.AUDIO],
@@ -150,9 +158,13 @@ export class BandwidthRtc {
       }
       this.callIsActive = false;
       this.pendingCallInfo = undefined;
+      // Clear the per-call stream so the next call cannot reuse a stale one; each
+      // call now negotiates a fresh track/stream (unique msid) with the gateway.
+      const mediaStream = this.pendingSubscribeStream;
+      this.pendingSubscribeStream = undefined;
       this.streamUnavailableHandler?.({
         mediaTypes: [MediaType.AUDIO],
-        mediaStream: this.pendingSubscribeStream!,
+        mediaStream: mediaStream!,
         callId,
       });
     });
@@ -580,26 +592,32 @@ export class BandwidthRtc {
 
         stream.onremovetrack = (event) => {
           logger.debug("onremovetrack", event);
-          // Guard against double-fire: WS streamUnavailable fires first on new gateway.
+          let removedTrack = event.track;
+          let deleteResult = availableTracks?.delete(removedTrack);
+          if (!deleteResult) {
+            return;
+          }
+          if (availableTracks?.size !== 0) {
+            logger.debug("Waiting on tracks to end", availableTracks);
+            return;
+          }
+          // Always clean up the per-call stream entry (each call uses a unique
+          // stream), even when the WS streamUnavailable already fired the event.
+          streamTracks.delete(stream);
+          // Fire only if the WS streamUnavailable hasn't already done so — on the
+          // new gateway WS fires first, so this is the fallback for gateways that
+          // don't send it.
           if (!this.callIsActive) {
             return;
           }
-          let removedTrack = event.track;
-          let deleteResult = availableTracks?.delete(removedTrack);
-          if (deleteResult) {
-            if (availableTracks?.size === 0) {
-              logger.debug("onStreamUnavailable", stream.id);
-              this.callIsActive = false;
-              this.pendingCallInfo = undefined;
-              this.streamUnavailableHandler?.({
-                mediaTypes: [MediaType.AUDIO],
-                mediaStream: stream,
-              });
-              streamTracks.delete(stream);
-            } else {
-              logger.debug("Waiting on tracks to end", availableTracks);
-            }
-          }
+          logger.debug("onStreamUnavailable", stream.id);
+          this.callIsActive = false;
+          this.pendingCallInfo = undefined;
+          this.pendingSubscribeStream = undefined;
+          this.streamUnavailableHandler?.({
+            mediaTypes: [MediaType.AUDIO],
+            mediaStream: stream,
+          });
         };
 
         this.pendingSubscribeStream = stream;
