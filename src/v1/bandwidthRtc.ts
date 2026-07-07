@@ -58,6 +58,12 @@ const CONNECTION_STATE_DISCONNECTED = "disconnected";
 // Disabled by default until the retry loop is production-hardened with a proper timeout/backoff.
 const RETRY_ICE_ON_FAILED = false;
 
+// The server can push a subscribe SDP offer before init() finishes creating the
+// subscribing RTCPeerConnection (the "ready" and "init" signaling events are not
+// sequenced against each other). Cap how long handleSubscribeSdpOffer will wait
+// for init() rather than hanging the subscribeMutex forever if init never runs.
+const SUBSCRIBING_PEER_CONNECTION_READY_TIMEOUT_MS = 10_000;
+
 export class BandwidthRtc {
   private options?: RtcOptions;
 
@@ -85,6 +91,12 @@ export class BandwidthRtc {
   // Current SDP revision for the subscribing peer; used to reject outdated SDP offers
   private subscribingPeerConnectionSdpRevision = 0;
 
+  // Resolves once init() has finished creating subscribingPeerConnection; lets
+  // handleSubscribeSdpOffer wait out the race instead of failing when a subscribe
+  // SDP offer arrives before init() completes.
+  private subscribingPeerConnectionReady: Promise<void>;
+  private markSubscribingPeerConnectionReady!: () => void;
+
   private localDtmfSenders: Map<string, RTCDTMFSender> = new Map();
 
   private streamAvailableHandler?: { (event: RtcStream): void };
@@ -102,6 +114,10 @@ export class BandwidthRtc {
 
     this.diagnosticsBatcher = new DiagnosticsBatcher();
     this.signaling = new Signaling(this.diagnosticsBatcher);
+
+    this.subscribingPeerConnectionReady = new Promise((resolve) => {
+      this.markSubscribingPeerConnectionReady = resolve;
+    });
 
     this.setMicEnabled = this.setMicEnabled.bind(this);
     this.setCameraEnabled = this.setCameraEnabled.bind(this);
@@ -445,8 +461,30 @@ export class BandwidthRtc {
     }
   }
 
+  // Waits for init() to have created subscribingPeerConnection. init() and the SDP
+  // offer that triggers this handler arrive as two independent signaling events, so
+  // the offer can otherwise show up first and find no peer connection to negotiate on.
+  private async waitForSubscribingPeerConnection(): Promise<void> {
+    if (this.subscribingPeerConnection) {
+      return;
+    }
+    let timeoutHandle: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(
+        () => reject(new BandwidthRtcError("Timed out waiting for subscribing RTCPeerConnection to be initialized")),
+        SUBSCRIBING_PEER_CONNECTION_READY_TIMEOUT_MS,
+      );
+    });
+    try {
+      await Promise.race([this.subscribingPeerConnectionReady, timeout]);
+    } finally {
+      clearTimeout(timeoutHandle!);
+    }
+  }
+
   private async handleSubscribeSdpOffer(subscribeSdpOffer: SubscribeSdpOffer): Promise<void> {
     try {
+      await this.waitForSubscribingPeerConnection();
       await this.subscribeMutex.runExclusive(async () => {
         logger.info("Received SDP offer", subscribeSdpOffer);
         logger.debug("Current SDP revision", this.subscribingPeerConnectionSdpRevision);
@@ -558,6 +596,7 @@ export class BandwidthRtc {
       subscriptionOnTrackHandler,
       setMediaPreferencesResponse.subscribeSdpOffer.sdpOffer,
     );
+    this.markSubscribingPeerConnectionReady();
   }
 
   private async setupPeerConnection(

@@ -1,5 +1,6 @@
 import { BandwidthRtc } from "./bandwidthRtc";
 import { setupMocks, setupNavigatorMocks } from "../mocks";
+import logger from "../logging";
 
 // Mock Signaling class
 jest.mock("./signaling", () => {
@@ -278,5 +279,90 @@ describe("bandwidthRtcV1 connect method", () => {
     expect(signaling.on).toHaveBeenCalledWith("ready", expect.any(Function));
     expect(signaling.on).toHaveBeenCalledWith("sdpOffer", expect.any(Function));
     expect(signaling.on).toHaveBeenCalledWith("init", expect.any(Function));
+  });
+});
+
+describe("bandwidthRtcV1 handleSubscribeSdpOffer / init race", () => {
+  beforeAll(() => {
+    setupNavigatorMocks();
+    setupMocks();
+  });
+
+  function makeMockPeerConnection() {
+    return {
+      setRemoteDescription: jest.fn().mockResolvedValue(undefined),
+      createAnswer: jest.fn().mockResolvedValue({ sdp: "answer-sdp" }),
+      setLocalDescription: jest.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  test("processes a subscribe SDP offer that arrives before init() finishes, once the peer connection becomes available", async () => {
+    const brtc = new BandwidthRtc();
+    const privateBrtc = brtc as any;
+    const mockPc = makeMockPeerConnection();
+    privateBrtc.signaling.answerSdp = jest.fn().mockResolvedValue(undefined);
+
+    // subscribingPeerConnection is intentionally unset here to simulate the SDP
+    // offer signaling event arriving before init() has finished creating it.
+    const handlePromise = privateBrtc.handleSubscribeSdpOffer({
+      sdpOffer: "offer-sdp",
+      sdpRevision: 1,
+      streamSourceMetadata: {},
+    });
+
+    // Let the pending call run past the point where it used to throw immediately.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mockPc.setRemoteDescription).not.toHaveBeenCalled();
+
+    // init() finishes afterward and marks the peer connection ready.
+    privateBrtc.subscribingPeerConnection = mockPc;
+    privateBrtc.markSubscribingPeerConnectionReady();
+
+    await handlePromise;
+
+    expect(mockPc.setRemoteDescription).toHaveBeenCalledWith({ type: "offer", sdp: "offer-sdp" });
+    expect(mockPc.setLocalDescription).toHaveBeenCalledWith({ sdp: "answer-sdp" });
+    expect(privateBrtc.signaling.answerSdp).toHaveBeenCalledWith("answer-sdp", "subscribe");
+    expect(privateBrtc.subscribingPeerConnectionSdpRevision).toBe(1);
+  });
+
+  test("times out waiting for the subscribing peer connection instead of hanging forever if init() never runs", async () => {
+    jest.useFakeTimers();
+    const debugSpy = jest.spyOn(logger, "debug").mockImplementation(() => {});
+    const brtc = new BandwidthRtc();
+    const privateBrtc = brtc as any;
+
+    const handlePromise = privateBrtc.handleSubscribeSdpOffer({
+      sdpOffer: "offer-sdp",
+      sdpRevision: 1,
+      streamSourceMetadata: {},
+    });
+
+    await jest.advanceTimersByTimeAsync(10_000);
+    await handlePromise;
+
+    expect(debugSpy).toHaveBeenCalledWith("error in handleSubscribeSdpOffer", expect.any(Error));
+
+    debugSpy.mockRestore();
+    jest.useRealTimers();
+  });
+
+  test("processes immediately when the subscribing peer connection is already available", async () => {
+    const brtc = new BandwidthRtc();
+    const privateBrtc = brtc as any;
+    const mockPc = makeMockPeerConnection();
+    privateBrtc.subscribingPeerConnection = mockPc;
+    privateBrtc.markSubscribingPeerConnectionReady();
+    privateBrtc.signaling.answerSdp = jest.fn().mockResolvedValue(undefined);
+
+    await privateBrtc.handleSubscribeSdpOffer({
+      sdpOffer: "offer-sdp",
+      sdpRevision: 1,
+      streamSourceMetadata: {},
+    });
+
+    expect(mockPc.setRemoteDescription).toHaveBeenCalledWith({ type: "offer", sdp: "offer-sdp" });
+    expect(privateBrtc.subscribingPeerConnectionSdpRevision).toBe(1);
   });
 });
