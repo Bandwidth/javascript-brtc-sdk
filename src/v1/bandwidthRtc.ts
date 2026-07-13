@@ -703,16 +703,25 @@ export class BandwidthRtc {
         // dropped from the SDP offer. Apply it unconditionally (not just when the caller
         // passes codecPreferences) so telephone-event is always present and RTCDTMFSender
         // can send RFC 4733 DTMF packets, regardless of the browser's default codec offer.
+        //
+        // RFC 4733: telephone-event shares the primary audio codec's RTP clock, so it MUST
+        // be offered at that codec's clock rate (e.g. 48000 alongside Opus). A mismatched
+        // telephone-event (e.g. 8000 next to Opus/48000) is silently dropped by the peer and
+        // DTMF never reaches the far end — so drop every telephone-event and re-add only the
+        // one whose clock rate matches, sourced from prefs or full capabilities.
         const audioCapabilities = typeof RTCRtpSender !== "undefined" ? RTCRtpSender.getCapabilities(TRACK_KIND_AUDIO) : undefined;
         const audioCodecs = codecPreferences?.audio ?? audioCapabilities?.codecs;
         if (audioCodecs) {
-          const hasTelephoneEvent = audioCodecs.some((c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE);
-          if (!hasTelephoneEvent) {
-            const telephoneEventCodec = audioCapabilities?.codecs.find((c) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE);
-            transceiver.setCodecPreferences(telephoneEventCodec ? [...audioCodecs, telephoneEventCodec] : audioCodecs);
-          } else {
-            transceiver.setCodecPreferences(audioCodecs);
-          }
+          // Strip every telephone-event, then re-add only the one whose clock rate matches the
+          // primary (first) media codec, preferring one already in the caller's list and falling
+          // back to full capabilities. If none matches, leave the codecs untouched rather than
+          // offer a telephone-event the peer will drop.
+          const isTelephoneEvent = (c: RTCRtpCodec) => c.mimeType.toLowerCase() === TELEPHONE_EVENT_MIME_TYPE;
+          const mediaCodecs = audioCodecs.filter((c) => !isTelephoneEvent(c));
+          const primaryClockRate = mediaCodecs[0]?.clockRate;
+          const matchesPrimary = (c: RTCRtpCodec) => isTelephoneEvent(c) && c.clockRate === primaryClockRate;
+          const telephoneEventCodec = audioCodecs.find(matchesPrimary) ?? audioCapabilities?.codecs.find(matchesPrimary);
+          transceiver.setCodecPreferences(telephoneEventCodec ? [...mediaCodecs, telephoneEventCodec] : audioCodecs);
         }
       } else if (track.kind === TRACK_KIND_VIDEO && codecPreferences?.video) {
         transceiver.setCodecPreferences(codecPreferences.video);
