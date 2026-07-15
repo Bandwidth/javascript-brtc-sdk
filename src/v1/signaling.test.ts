@@ -250,4 +250,16 @@ describe("Signaling test all the smaller functions", () => {
   test("should setMediaPreferences without error", async () => {
     await expect((signaling as any).setMediaPreferences({ video: { maxBitrate: 1000, maxFramerate: 30 } })).resolves.not.toThrow();
   });
+
+  test("should acceptStream via the acceptStream RPC with no params", async () => {
+    const ws = (signaling as any).ws;
+    await expect(signaling.acceptStream()).resolves.toBeDefined();
+    expect(ws.call).toHaveBeenCalledWith("acceptStream", {});
+  });
+
+  test("should declineStream via the declineStream RPC with no params", async () => {
+    const ws = (signaling as any).ws;
+    await expect(signaling.declineStream()).resolves.toBeDefined();
+    expect(ws.call).toHaveBeenCalledWith("declineStream", {});
+  });
 });

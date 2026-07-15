@@ -36,10 +36,11 @@ export interface RtcOptions {
   iceServers?: RTCIceServer[];
   iceTransportPolicy?: RTCIceTransportPolicy;
   /**
-   * When true (default), the gateway sets autoAccepted=true on the streamAvailable
-   * notification so the SDK skips the accept/decline prompt and the call connects
-   * immediately. Set to false to show a prompt and require the user to call
-   * acceptStream or declineStream.
+   * When true (default), the gateway opens its egress gate as soon as the call
+   * bridges, so audio flows immediately and onStreamAvailable reports
+   * autoAccepted=true. Set to false to park the call (ringing, no audio) and
+   * prompt the user: call acceptStream to open the gate or declineStream to end
+   * the call. Passed to the gateway via setMediaPreferences.
    */
   autoAccept?: boolean;
 }
@@ -47,8 +48,18 @@ export interface RtcOptions {
 export interface RtcStream {
   mediaTypes: MediaType[];
   mediaStream: MediaStream;
-  callId?: string;
+  /** Identity of the caller, from the gateway's subscribe offer track metadata. */
+  from?: string;
+  /** Kind of the caller identity (e.g. "call", "endpoint"). */
+  fromType?: string;
+  /**
+   * True when the gateway auto-accepted the stream (audio already flowing). When
+   * false, the call is parked/ringing: prompt the user and call acceptStream or
+   * declineStream.
+   */
   autoAccepted?: boolean;
+  /** Free-form tags forwarded by the gateway, if any. */
+  tags?: string;
 }
 
 export class BandwidthRtcError extends Error {}

@@ -26,6 +26,7 @@ import {
   StreamMetadata,
   StreamPublishMetadata,
   SubscribeSdpOffer,
+  TrackMetadata,
   SetMediaPreferencesWebRtcResponse,
   SdpAnswer,
 } from "./types";
@@ -91,16 +92,12 @@ export class BandwidthRtc {
   private streamUnavailableHandler?: { (event: RtcStream): void };
   private readyHandler?: { (readyMetadata: ReadyMetadata): void };
 
-  // Pending state for correlating the per-call WebRTC ontrack with the WS
-  // streamAvailable notification. The gateway negotiates a fresh subscribe track
-  // per call (ontrack) and sends a WS streamAvailable carrying callId/autoAccepted;
-  // we hold whichever arrives first and fire a single combined onStreamAvailable
-  // once we have both. Both are cleared at call end so the next call starts clean.
-  private pendingSubscribeStream: MediaStream | undefined;
-  private pendingCallInfo: { callId: string; autoAccepted: boolean } | undefined;
-  // Ensures onStreamAvailable/onStreamUnavailable each fire exactly once per call
-  // across the WS, ontrack, onunmute, and onremovetrack paths.
-  private callIsActive = false;
+  // Caller identity for pending subscribe tracks, keyed by track id. The gateway
+  // negotiates a fresh subscribe track per call and rides the call's metadata on
+  // the same sdpOffer that adds it (SubscribeSdpOffer.trackMetadata). We stash it
+  // here when the offer arrives and attach it to onStreamAvailable when the
+  // matching ontrack fires. Entries are cleared once consumed.
+  private subscribeTrackMetadata: Map<string, TrackMetadata> = new Map();
 
   /**
    * Construct a new instance of BandwidthRtc
@@ -132,42 +129,6 @@ export class BandwidthRtc {
     this.signaling.on("ready", this.handleReady.bind(this));
     this.signaling.on("sdpOffer", this.handleSubscribeSdpOffer.bind(this));
     this.signaling.on("init", this.init.bind(this));
-    this.signaling.on("streamAvailable", ({ callId, autoAccepted }: { callId: string; autoAccepted: boolean }) => {
-      if (this.callIsActive) {
-        // Already fired for this call (e.g. via the onunmute fallback). Don't
-        // double-fire; the metadata-bearing path just loses the race here.
-        return;
-      }
-      if (this.pendingSubscribeStream) {
-        // ontrack for this call already fired — fire the combined event now.
-        this.callIsActive = true;
-        this.streamAvailableHandler?.({
-          mediaTypes: [MediaType.AUDIO],
-          mediaStream: this.pendingSubscribeStream,
-          callId,
-          autoAccepted,
-        });
-      } else {
-        // ontrack hasn't fired yet — store and fire once it does.
-        this.pendingCallInfo = { callId, autoAccepted };
-      }
-    });
-    this.signaling.on("streamUnavailable", ({ callId }: { callId: string }) => {
-      if (!this.callIsActive) {
-        return;
-      }
-      this.callIsActive = false;
-      this.pendingCallInfo = undefined;
-      // Clear the per-call stream so the next call cannot reuse a stale one; each
-      // call now negotiates a fresh track/stream (unique msid) with the gateway.
-      const mediaStream = this.pendingSubscribeStream;
-      this.pendingSubscribeStream = undefined;
-      this.streamUnavailableHandler?.({
-        mediaTypes: [MediaType.AUDIO],
-        mediaStream: mediaStream!,
-        callId,
-      });
-    });
 
     await this.signaling.connect(authParams, options);
     logger.info("Successfully connected");
@@ -415,12 +376,12 @@ export class BandwidthRtc {
     return this.signaling.hangupConnection(endpoint, type);
   }
 
-  acceptStream(callId?: string): Promise<void> {
-    return this.signaling.acceptStream(callId);
+  acceptStream(): Promise<void> {
+    return this.signaling.acceptStream();
   }
 
-  declineStream(callId?: string): Promise<void> {
-    return this.signaling.declineStream(callId);
+  declineStream(): Promise<void> {
+    return this.signaling.declineStream();
   }
 
   // Re-publishes the SDP with iceRestart=true to trigger ICE renegotiation after a connection failure.
@@ -519,6 +480,12 @@ export class BandwidthRtc {
           throw new BandwidthRtcError("No subscribing RTCPeerConnection, cannot handle SDP offer");
         }
 
+        // Stash per-track caller identity before applying the offer: setRemoteDescription
+        // can fire ontrack synchronously, and the handler looks the metadata up by track id.
+        for (const [trackId, metadata] of Object.entries(subscribeSdpOffer.trackMetadata ?? {})) {
+          this.subscribeTrackMetadata.set(trackId, metadata);
+        }
+
         await this.subscribingPeerConnection!.setRemoteDescription({
           type: "offer",
           sdp: remoteSdpOffer,
@@ -563,17 +530,6 @@ export class BandwidthRtc {
 
       track.onunmute = (event) => {
         logger.debug("onunmute", event.target);
-        // Fallback for gateways that don't send WS streamAvailable: fire
-        // onStreamAvailable when audio actually starts flowing. No-op on new
-        // gateways because callIsActive is already true from the WS event.
-        if (!this.callIsActive && this.pendingSubscribeStream) {
-          this.callIsActive = true;
-          logger.debug("onStreamAvailable (onunmute fallback)", this.pendingSubscribeStream.id);
-          this.streamAvailableHandler?.({
-            mediaTypes: [MediaType.AUDIO],
-            mediaStream: this.pendingSubscribeStream,
-          });
-        }
       };
 
       track.onended = (event) => {
@@ -601,40 +557,46 @@ export class BandwidthRtc {
             logger.debug("Waiting on tracks to end", availableTracks);
             return;
           }
-          // Always clean up the per-call stream entry (each call uses a unique
-          // stream), even when the WS streamUnavailable already fired the event.
+          // The gateway removed this call's subscribe track and re-offered, so the
+          // m-section went inactive: the stream is unavailable. Each call uses a
+          // unique stream, so clean up its entry as we fire.
           streamTracks.delete(stream);
-          // Fire only if the WS streamUnavailable hasn't already done so — on the
-          // new gateway WS fires first, so this is the fallback for gateways that
-          // don't send it.
-          if (!this.callIsActive) {
-            return;
-          }
           logger.debug("onStreamUnavailable", stream.id);
-          this.callIsActive = false;
-          this.pendingCallInfo = undefined;
-          this.pendingSubscribeStream = undefined;
           this.streamUnavailableHandler?.({
             mediaTypes: [MediaType.AUDIO],
             mediaStream: stream,
           });
         };
-
-        this.pendingSubscribeStream = stream;
-        if (this.pendingCallInfo) {
-          // WS arrived before ontrack — fire the combined event now.
-          const { callId, autoAccepted } = this.pendingCallInfo;
-          this.pendingCallInfo = undefined;
-          this.callIsActive = true;
-          logger.debug("onStreamAvailable (WS-enriched)", stream.id);
-          this.streamAvailableHandler?.({
-            mediaTypes: [MediaType.AUDIO],
-            mediaStream: stream,
-            callId,
-            autoAccepted,
-          });
-        }
       }
+
+      // The gateway adds a fresh subscribe track per call and rides that call's
+      // caller identity on the same offer, keyed by track id. ontrack firing means
+      // the offer gained an active m-section — the stream is now available.
+      const stream = event.streams[0];
+      if (!stream) {
+        logger.debug("ontrack fired with no associated stream, not firing onStreamAvailable");
+        return;
+      }
+      let metadata = this.subscribeTrackMetadata.get(track.id);
+      if (metadata) {
+        this.subscribeTrackMetadata.delete(track.id);
+      } else if (this.subscribeTrackMetadata.size === 1) {
+        // The offer's msid track id normally equals the browser's track.id, but
+        // guard against a browser that rewrites it: a call adds exactly one track
+        // and rides exactly one metadata entry, so the sole pending entry is ours.
+        const [onlyTrackId] = this.subscribeTrackMetadata.keys();
+        metadata = this.subscribeTrackMetadata.get(onlyTrackId);
+        this.subscribeTrackMetadata.delete(onlyTrackId);
+      }
+      logger.debug("onStreamAvailable", stream.id, metadata);
+      this.streamAvailableHandler?.({
+        mediaTypes: [MediaType.AUDIO],
+        mediaStream: stream,
+        from: metadata?.from,
+        fromType: metadata?.fromType,
+        autoAccepted: metadata?.autoAccepted,
+        tags: metadata?.tags,
+      });
     };
     this.subscribingPeerConnection = await this.setupPeerConnection(
       PEER_CONNECTION_TYPE_SUBSCRIBE,

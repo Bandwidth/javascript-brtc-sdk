@@ -258,18 +258,28 @@ class BandwidthRtc {
     return this.delegate.hangupConnection(endpoint, type);
   }
 
-  acceptStream(callId?: string): Promise<void> {
+  /**
+   * Accept an incoming stream surfaced by onStreamAvailable with autoAccepted=false.
+   * The gateway opens its egress gate so call audio flows in both directions. No-op
+   * when autoAccept was left on (the gateway already opened the gate).
+   */
+  acceptStream(): Promise<void> {
     if (!this.delegate) {
       throw new BandwidthRtcError("You must call 'connect' before 'acceptStream'");
     }
-    return this.delegate.acceptStream(callId);
+    return this.delegate.acceptStream();
   }
 
-  declineStream(callId?: string): Promise<void> {
+  /**
+   * Decline an incoming stream surfaced by onStreamAvailable with autoAccepted=false.
+   * The gateway keeps its egress gate closed and cancels the call, ending the
+   * remote leg; onStreamUnavailable follows.
+   */
+  declineStream(): Promise<void> {
     if (!this.delegate) {
       throw new BandwidthRtcError("You must call 'connect' before 'declineStream'");
     }
-    return this.delegate.declineStream(callId);
+    return this.delegate.declineStream();
   }
 }
 
