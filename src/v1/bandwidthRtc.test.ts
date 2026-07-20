@@ -184,39 +184,60 @@ describe("bandwidthRtcV1 addStreamToPublishingPeerConnection", () => {
     expect((brtc as any).localDtmfSenders.has("stream-1")).toBe(false);
   });
 
-  test("appends telephone-event codec when missing from audio preferences", () => {
+  test("appends the clock-matched telephone-event when missing from audio preferences", () => {
     const brtc = new BandwidthRtc();
     const transceiver = makeTransceiver();
     withPublishingPeerConnection(brtc, transceiver);
 
-    const telephoneEventCodec = { mimeType: "audio/telephone-event", clockRate: 8000 };
-    (global as any).RTCRtpSender = { getCapabilities: jest.fn().mockReturnValue({ codecs: [telephoneEventCodec] }) };
+    const te8000 = { mimeType: "audio/telephone-event", clockRate: 8000 };
+    const te48000 = { mimeType: "audio/telephone-event", clockRate: 48000 };
+    (global as any).RTCRtpSender = { getCapabilities: jest.fn().mockReturnValue({ codecs: [te8000, te48000] }) };
 
     const opusCodec = { mimeType: "audio/opus", clockRate: 48000 };
     (brtc as any).addStreamToPublishingPeerConnection(makeMockStream("stream-1", "audio"), { audio: [opusCodec] });
 
-    expect(transceiver.setCodecPreferences).toHaveBeenCalledWith([opusCodec, telephoneEventCodec]);
+    // Must pair with telephone-event/48000 (Opus clock), not the 8000 variant.
+    expect(transceiver.setCodecPreferences).toHaveBeenCalledWith([opusCodec, te48000]);
   });
 
-  test("does not duplicate telephone-event when already in preferences", () => {
+  test("replaces a clock-mismatched telephone-event already in preferences", () => {
     const brtc = new BandwidthRtc();
     const transceiver = makeTransceiver();
     withPublishingPeerConnection(brtc, transceiver);
 
     const opusCodec = { mimeType: "audio/opus", clockRate: 48000 };
-    const telephoneEventCodec = { mimeType: "audio/telephone-event", clockRate: 8000 };
-    (brtc as any).addStreamToPublishingPeerConnection(makeMockStream("stream-1", "audio"), { audio: [opusCodec, telephoneEventCodec] });
+    const te8000 = { mimeType: "audio/telephone-event", clockRate: 8000 };
+    const te48000 = { mimeType: "audio/telephone-event", clockRate: 48000 };
+    (global as any).RTCRtpSender = { getCapabilities: jest.fn().mockReturnValue({ codecs: [te48000] }) };
 
-    expect(transceiver.setCodecPreferences).toHaveBeenCalledWith([opusCodec, telephoneEventCodec]);
+    (brtc as any).addStreamToPublishingPeerConnection(makeMockStream("stream-1", "audio"), { audio: [opusCodec, te8000] });
+
+    // The mismatched 8000 event is dropped and replaced with the 48000 one from capabilities.
+    expect(transceiver.setCodecPreferences).toHaveBeenCalledWith([opusCodec, te48000]);
     expect(transceiver.setCodecPreferences).toHaveBeenCalledTimes(1);
   });
 
-  test("falls back to original preferences when telephone-event not found in capabilities", () => {
+  test("keeps the clock-matched telephone-event already in preferences", () => {
     const brtc = new BandwidthRtc();
     const transceiver = makeTransceiver();
     withPublishingPeerConnection(brtc, transceiver);
 
-    (global as any).RTCRtpSender = { getCapabilities: jest.fn().mockReturnValue({ codecs: [] }) };
+    const opusCodec = { mimeType: "audio/opus", clockRate: 48000 };
+    const te48000 = { mimeType: "audio/telephone-event", clockRate: 48000 };
+    (brtc as any).addStreamToPublishingPeerConnection(makeMockStream("stream-1", "audio"), { audio: [opusCodec, te48000] });
+
+    expect(transceiver.setCodecPreferences).toHaveBeenCalledWith([opusCodec, te48000]);
+    expect(transceiver.setCodecPreferences).toHaveBeenCalledTimes(1);
+  });
+
+  test("falls back to original preferences when no clock-matched telephone-event is available", () => {
+    const brtc = new BandwidthRtc();
+    const transceiver = makeTransceiver();
+    withPublishingPeerConnection(brtc, transceiver);
+
+    // Only a mismatched (8000) telephone-event exists; better to omit it than offer a dropped codec.
+    const te8000 = { mimeType: "audio/telephone-event", clockRate: 8000 };
+    (global as any).RTCRtpSender = { getCapabilities: jest.fn().mockReturnValue({ codecs: [te8000] }) };
 
     const opusCodec = { mimeType: "audio/opus", clockRate: 48000 };
     (brtc as any).addStreamToPublishingPeerConnection(makeMockStream("stream-1", "audio"), { audio: [opusCodec] });
@@ -224,18 +245,20 @@ describe("bandwidthRtcV1 addStreamToPublishingPeerConnection", () => {
     expect(transceiver.setCodecPreferences).toHaveBeenCalledWith([opusCodec]);
   });
 
-  test("forces telephone-event into codec preferences even without explicit codecPreferences", () => {
+  test("forces the clock-matched telephone-event even without explicit codecPreferences", () => {
     const brtc = new BandwidthRtc();
     const transceiver = makeTransceiver();
     withPublishingPeerConnection(brtc, transceiver);
 
     const opusCodec = { mimeType: "audio/opus", clockRate: 48000 };
-    const telephoneEventCodec = { mimeType: "audio/telephone-event", clockRate: 8000 };
-    (global as any).RTCRtpSender = { getCapabilities: jest.fn().mockReturnValue({ codecs: [opusCodec, telephoneEventCodec] }) };
+    const te8000 = { mimeType: "audio/telephone-event", clockRate: 8000 };
+    const te48000 = { mimeType: "audio/telephone-event", clockRate: 48000 };
+    (global as any).RTCRtpSender = { getCapabilities: jest.fn().mockReturnValue({ codecs: [opusCodec, te8000, te48000] }) };
 
     (brtc as any).addStreamToPublishingPeerConnection(makeMockStream("stream-1", "audio"));
 
-    expect(transceiver.setCodecPreferences).toHaveBeenCalledWith([opusCodec, telephoneEventCodec]);
+    // Full capabilities collapse to the primary codec + its matching-clock telephone-event.
+    expect(transceiver.setCodecPreferences).toHaveBeenCalledWith([opusCodec, te48000]);
   });
 
   test("skips setCodecPreferences when RTCRtpSender is unavailable (e.g. non-browser environment)", () => {
