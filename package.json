@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "description": "SDK for BandwidthRTC Node Applications",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "scripts": {
     "build": "rm -rf ./dist/* && prettier --check  . && tsc && webpack --config webpack.prod.js",
     "build:dev": "rm -rf ./dist/* && prettier --check  . && tsc && webpack --config webpack.dev.js",

@@ -15,6 +15,7 @@ class Signaling extends EventEmitter {
   private isReady: boolean = false;
   private readyMetadata: ReadyMetadata | null = null;
   private diagnosticsBatcher?: DiagnosticsBatcher;
+  private rtcOptions?: RtcOptions;
 
   constructor(diagnosticsBatcher?: DiagnosticsBatcher) {
     super();
@@ -35,6 +36,7 @@ class Signaling extends EventEmitter {
       if (options) {
         rtcOptions = { ...rtcOptions, ...options };
       }
+      this.rtcOptions = rtcOptions;
       const websocketUrl = `${rtcOptions.websocketUrl}?client=node&sdkVersion=${sdkVersion}&uniqueId=${this.uniqueDeviceId}&endpointToken=${authParams.endpointToken}`;
       logger.debug(`Connecting to ${websocketUrl}`);
       console.log(`Connecting to ${websocketUrl}`);
@@ -114,9 +116,11 @@ class Signaling extends EventEmitter {
   }
 
   private setMediaPreferences(): Promise<{}> {
-    logger.debug(`Calling "setMediaPreferences"`, { protocol: "WEBRTC" });
+    const autoAccept = this.rtcOptions?.autoAccept ?? true;
+    logger.debug(`Calling "setMediaPreferences"`, { protocol: "WEBRTC", autoAccept });
     return this.ws?.call("setMediaPreferences", {
       protocol: "WEBRTC",
+      autoAccept,
     }) as Promise<SetMediaPreferencesWebRtcResponse>;
   }
 
@@ -173,18 +177,20 @@ class Signaling extends EventEmitter {
     }) as Promise<HangupResult>;
   }
 
+  acceptStream(): Promise<void> {
+    logger.debug(`Calling "acceptStream"`);
+    return this.ws?.call("acceptStream", {}) as Promise<void>;
+  }
+
+  declineStream(): Promise<void> {
+    logger.debug(`Calling "declineStream"`);
+    return this.ws?.call("declineStream", {}) as Promise<void>;
+  }
+
   offerSdp(peerType: string, sdpOffer: string): Promise<SdpAnswer> {
     logger.debug(`Calling "offerSdp"`, { sdpOffer: sdpOffer, peerType: peerType });
     return this.ws?.call("offerSdp", { sdpOffer: sdpOffer, peerType: peerType }) as Promise<SdpAnswer>;
   }
-
-  // offerSdp(sdpOffer: string, metadata: PublishMetadata): Promise<PublishSdpAnswer> {
-  //   logger.debug(`Calling "offerSdp"`, { sdpOffer: sdpOffer, mediaMetadata: metadata });
-  //   return this.ws?.call("offerSdp", {
-  //     sdpOffer: sdpOffer,
-  //     mediaMetadata: metadata,
-  //   }) as Promise<PublishSdpAnswer>;
-  // }
 
   answerSdp(sdpAnswer: string, peerType: string): Promise<void> {
     logger.debug(`Calling "answerSdp"`, { sdpAnswer: sdpAnswer });

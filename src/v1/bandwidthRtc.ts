@@ -26,6 +26,7 @@ import {
   StreamMetadata,
   StreamPublishMetadata,
   SubscribeSdpOffer,
+  TrackMetadata,
   SetMediaPreferencesWebRtcResponse,
   SdpAnswer,
 } from "./types";
@@ -91,6 +92,13 @@ export class BandwidthRtc {
   private streamUnavailableHandler?: { (event: RtcStream): void };
   private readyHandler?: { (readyMetadata: ReadyMetadata): void };
 
+  // Caller identity for pending subscribe tracks, keyed by track id. The gateway
+  // negotiates a fresh subscribe track per call and rides the call's metadata on
+  // the same sdpOffer that adds it (SubscribeSdpOffer.trackMetadata). We stash it
+  // here when the offer arrives and attach it to onStreamAvailable when the
+  // matching ontrack fires. Entries are cleared once consumed.
+  private subscribeTrackMetadata: Map<string, TrackMetadata> = new Map();
+
   /**
    * Construct a new instance of BandwidthRtc
    * @param logLevel desired log level for logs that will appear in the browser's console, optional
@@ -121,6 +129,7 @@ export class BandwidthRtc {
     this.signaling.on("ready", this.handleReady.bind(this));
     this.signaling.on("sdpOffer", this.handleSubscribeSdpOffer.bind(this));
     this.signaling.on("init", this.init.bind(this));
+
     await this.signaling.connect(authParams, options);
     logger.info("Successfully connected");
   }
@@ -135,7 +144,7 @@ export class BandwidthRtc {
   }
 
   /**
-   * Set the function that will be called when a subscribed stream becomes available
+   * Set the function that will be called when a subscribed stream becomes available.
    * @param callback callback function
    */
   onStreamAvailable(callback: { (event: RtcStream): void }): void {
@@ -240,7 +249,7 @@ export class BandwidthRtc {
         }
       } else {
         publishedStreams.push({
-          mediaStream: stream.mediaStream,
+          mediaStream: stream.mediaStream!,
         });
       }
     }
@@ -324,7 +333,7 @@ export class BandwidthRtc {
   setMicEnabled(enabled: boolean, stream?: RtcStream | string) {
     logger.info(`Setting microphone enabled: ${enabled}`);
     if (stream && typeof stream !== "string") {
-      stream = stream.mediaStream.id;
+      stream = stream.mediaStream!.id;
     }
     [...this.publishedStreams]
       .filter(([msid]) => !stream || stream === msid)
@@ -339,7 +348,7 @@ export class BandwidthRtc {
   setCameraEnabled(enabled: boolean, stream?: RtcStream | string) {
     logger.info(`Setting camera enabled: ${enabled}`);
     if (stream && typeof stream !== "string") {
-      stream = stream.mediaStream.id;
+      stream = stream.mediaStream!.id;
     }
     [...this.publishedStreams]
       .filter(([msid]) => !stream || stream === msid)
@@ -365,6 +374,14 @@ export class BandwidthRtc {
 
   hangupConnection(endpoint: string, type: EndpointType): Promise<HangupResult> {
     return this.signaling.hangupConnection(endpoint, type);
+  }
+
+  acceptStream(): Promise<void> {
+    return this.signaling.acceptStream();
+  }
+
+  declineStream(): Promise<void> {
+    return this.signaling.declineStream();
   }
 
   // Re-publishes the SDP with iceRestart=true to trigger ICE renegotiation after a connection failure.
@@ -463,6 +480,12 @@ export class BandwidthRtc {
           throw new BandwidthRtcError("No subscribing RTCPeerConnection, cannot handle SDP offer");
         }
 
+        // Stash per-track caller identity before applying the offer: setRemoteDescription
+        // can fire ontrack synchronously, and the handler looks the metadata up by track id.
+        for (const [trackId, metadata] of Object.entries(subscribeSdpOffer.trackMetadata ?? {})) {
+          this.subscribeTrackMetadata.set(trackId, metadata);
+        }
+
         await this.subscribingPeerConnection!.setRemoteDescription({
           type: "offer",
           sdp: remoteSdpOffer,
@@ -525,33 +548,55 @@ export class BandwidthRtc {
 
         stream.onremovetrack = (event) => {
           logger.debug("onremovetrack", event);
-          if (this.streamUnavailableHandler) {
-            let removedTrack = event.track;
-            let deleteResult = availableTracks?.delete(removedTrack);
-            if (deleteResult) {
-              if (availableTracks?.size === 0) {
-                logger.debug("onStreamUnavailable", stream.id);
-                this.streamUnavailableHandler({
-                  mediaTypes: [MediaType.AUDIO],
-                  mediaStream: stream,
-                });
-                streamTracks.delete(stream);
-              } else {
-                logger.debug("Waiting on tracks to end", availableTracks);
-              }
-            }
+          let removedTrack = event.track;
+          let deleteResult = availableTracks?.delete(removedTrack);
+          if (!deleteResult) {
+            return;
           }
-        };
-        if (this.streamAvailableHandler) {
-          logger.debug("onStreamAvailable", stream.id);
-          this.streamAvailableHandler({
+          if (availableTracks?.size !== 0) {
+            logger.debug("Waiting on tracks to end", availableTracks);
+            return;
+          }
+          // The gateway removed this call's subscribe track and re-offered, so the
+          // m-section went inactive: the stream is unavailable. Each call uses a
+          // unique stream, so clean up its entry as we fire.
+          streamTracks.delete(stream);
+          logger.debug("onStreamUnavailable", stream.id);
+          this.streamUnavailableHandler?.({
             mediaTypes: [MediaType.AUDIO],
             mediaStream: stream,
           });
-        } else {
-          logger.debug("Waiting on additional tracks");
-        }
+        };
       }
+
+      // The gateway adds a fresh subscribe track per call and rides that call's
+      // caller identity on the same offer, keyed by track id. ontrack firing means
+      // the offer gained an active m-section — the stream is now available.
+      const stream = event.streams[0];
+      if (!stream) {
+        logger.debug("ontrack fired with no associated stream, not firing onStreamAvailable");
+        return;
+      }
+      let metadata = this.subscribeTrackMetadata.get(track.id);
+      if (metadata) {
+        this.subscribeTrackMetadata.delete(track.id);
+      } else if (this.subscribeTrackMetadata.size === 1) {
+        // The offer's msid track id normally equals the browser's track.id, but
+        // guard against a browser that rewrites it: a call adds exactly one track
+        // and rides exactly one metadata entry, so the sole pending entry is ours.
+        const [onlyTrackId] = this.subscribeTrackMetadata.keys();
+        metadata = this.subscribeTrackMetadata.get(onlyTrackId);
+        this.subscribeTrackMetadata.delete(onlyTrackId);
+      }
+      logger.debug("onStreamAvailable", stream.id, metadata);
+      this.streamAvailableHandler?.({
+        mediaTypes: [MediaType.AUDIO],
+        mediaStream: stream,
+        from: metadata?.from,
+        fromType: metadata?.fromType,
+        autoAccepted: metadata?.autoAccepted,
+        tags: metadata?.tags,
+      });
     };
     this.subscribingPeerConnection = await this.setupPeerConnection(
       PEER_CONNECTION_TYPE_SUBSCRIBE,
