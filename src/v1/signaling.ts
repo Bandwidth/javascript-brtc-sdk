@@ -143,6 +143,25 @@ class Signaling extends EventEmitter {
           logger.error("Error sending diagnostics... websocket may be disconnected", err);
         }
       }
+      // Stop auto-reconnect BEFORE closing. The client is constructed with
+      // `reconnect: true, max_reconnects: 0` (unlimited), and rpc-websockets
+      // only skips reconnecting when the close code is exactly 1000 — so any
+      // other code (notably 1001/StatusGoingAway, which the gateway sends
+      // whenever it wants the device to come back) puts the client into an
+      // endless reconnect loop. That loop outlives this disconnect: because
+      // removeAllListeners() has already run, the reconnected socket has no
+      // "open" handler, so it never calls setMediaPreferences, never creates
+      // peer connections, and never answers the heartbeat — an inert
+      // connection on the gateway that nothing on either side reaps.
+      //
+      // Reconnect stays enabled for the lifetime of a live connection (that is
+      // the point of it); it is only disabled here, where the caller has asked
+      // to disconnect and we are tearing this client down for good.
+      try {
+        this.ws.setAutoReconnect(false);
+      } catch (err) {
+        logger.error("Error disabling auto-reconnect", err);
+      }
       this.ws.removeAllListeners();
       try {
         this.ws.close();

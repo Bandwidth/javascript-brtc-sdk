@@ -197,6 +197,40 @@ describe("Signaling disconnect", () => {
     expect((signaling as any).isReady).toBe(false);
   });
 
+  // The client is built with `reconnect: true, max_reconnects: 0` and
+  // rpc-websockets only skips reconnecting on close code exactly 1000. Without
+  // this, a gateway-initiated 1001 close leaves an endless reconnect loop
+  // behind a client whose listeners have already been removed — an inert
+  // connection on the gateway that neither side ever reaps.
+  test("should disable auto-reconnect before closing on disconnect", async () => {
+    const signaling = new Signaling();
+    await signaling.connect({ endpointToken: "test-token" });
+
+    const ws = (signaling as any).ws;
+    const callOrder: string[] = [];
+    ws.setAutoReconnect.mockImplementation(() => callOrder.push("setAutoReconnect"));
+    ws.close.mockImplementation(() => callOrder.push("close"));
+
+    signaling.disconnect();
+
+    expect(ws.setAutoReconnect).toHaveBeenCalledWith(false);
+    expect(callOrder).toEqual(["setAutoReconnect", "close"]);
+  });
+
+  test("should still close when disabling auto-reconnect throws", async () => {
+    const signaling = new Signaling();
+    await signaling.connect({ endpointToken: "test-token" });
+
+    const ws = (signaling as any).ws;
+    ws.setAutoReconnect.mockImplementation(() => {
+      throw new Error("socket already gone");
+    });
+
+    expect(() => signaling.disconnect()).not.toThrow();
+    expect(ws.close).toHaveBeenCalled();
+    expect((signaling as any).ws).toBeNull();
+  });
+
   test("should handle disconnect with diagnosticsBatcher", async () => {
     const diagnosticsBatcher = new DiagnosticsBatcher();
     const shutdownSpy = jest.spyOn(diagnosticsBatcher, "shutdown");
