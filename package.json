@@ -50,12 +50,11 @@
     "webpack-merge": "^6.0.1"
   },
   "dependencies": {
-    "@types/uuid": "^10.0.0",
     "async-mutex": "^0.5.0",
     "jwt-decode": "^4.0.0",
-    "rpc-websockets": "7.10.0",
-    "uuid": "^13.0.0",
-    "webrtc-adapter": "^9.0.3"
+    "rpc-websockets": "^10.0.1",
+    "uuid": "^11.0.4",
+    "webrtc-adapter": "^9.0.6"
   },
   "publishConfig": {
     "access": "public"
