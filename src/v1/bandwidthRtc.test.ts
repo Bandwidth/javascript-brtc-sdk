@@ -272,6 +272,42 @@ describe("bandwidthRtcV1 addStreamToPublishingPeerConnection", () => {
   });
 });
 
+describe("bandwidthRtcV1 init reconnect replay", () => {
+  function stubSetupPeerConnection(brtc: BandwidthRtc) {
+    // init() only needs a stand-in RTCPeerConnection; the real
+    // negotiation performed by setupPeerConnection is exercised elsewhere.
+    (brtc as any).setupPeerConnection = jest.fn().mockResolvedValue({});
+  }
+
+  test("does not replay when no streams were previously published (first connect)", async () => {
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    const addSpy = jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection");
+    const offerSpy = jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+
+    expect(addSpy).not.toHaveBeenCalled();
+    expect(offerSpy).not.toHaveBeenCalled();
+  });
+
+  test("re-attaches previously published streams to the new publishing peer connection on reconnect", async () => {
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    const addSpy = jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    const offerSpy = jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    const mediaStream = { id: "stream-1" } as any;
+    (brtc as any).publishedStreams.set(mediaStream.id, { mediaStream });
+
+    // Simulate the websocket "open" handler re-emitting "init" after a reconnect.
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+
+    expect(addSpy).toHaveBeenCalledWith(mediaStream);
+    expect(offerSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("bandwidthRtcV1 connect method", () => {
   beforeAll(() => {
     setupNavigatorMocks();

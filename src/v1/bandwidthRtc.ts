@@ -603,6 +603,17 @@ export class BandwidthRtc {
       subscriptionOnTrackHandler,
       setMediaPreferencesResponse.subscribeSdpOffer.sdpOffer,
     );
+
+    // On a fresh connect, publishedStreams is empty and this is a no-op. On a
+    // reconnect (the websocket re-opened and re-emitted "init"), the new
+    // publishingPeerConnection above is trackless, so re-attach every
+    // previously published stream and renegotiate to carry them over.
+    if (this.publishedStreams.size > 0) {
+      for (const { mediaStream } of this.publishedStreams.values()) {
+        this.addStreamToPublishingPeerConnection(mediaStream);
+      }
+      await this.offerPublishSdp();
+    }
   }
 
   private async setupPeerConnection(
