@@ -23,6 +23,15 @@ export enum EndpointType {
 
 export type AudioLevelChangeHandler = { (audioLevel: AudioLevel): void };
 
+export interface DtmfSentEvent {
+  /** The DTMF tone that was just played, e.g. "1" or "#" */
+  tone: string;
+  /** Id of the published MediaStream the tone was sent on */
+  streamId: string;
+}
+
+export type DtmfSentHandler = { (event: DtmfSentEvent): void };
+
 /**
  * @property {string} endpointToken - The endpoint token is a "string" in the JWT format.
  * To be possible the token utilization, parse the token using "jwt_decode" function, the expected result should be a {@link JwtPayload} object.

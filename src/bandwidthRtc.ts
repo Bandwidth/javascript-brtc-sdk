@@ -6,6 +6,7 @@ import { jwtDecode } from "jwt-decode";
 import {
   AudioLevelChangeHandler,
   BandwidthRtcError,
+  DtmfSentHandler,
   EndpointType,
   HangupResult,
   OutboundConnectionResult,
@@ -23,6 +24,7 @@ class BandwidthRtc {
   private streamAvailableHandler?: { (event: RtcStream): void };
   private streamUnavailableHandler?: { (event: RtcStream): void };
   private readyHandler?: { (readyMetadata: ReadyMetadata): void };
+  private dtmfSentHandler?: DtmfSentHandler;
 
   private logLevel?: LogLevel;
   private delegate?: BandwidthRtcV1;
@@ -81,6 +83,10 @@ class BandwidthRtc {
       this.delegate!.onReady(this.readyHandler);
     }
 
+    if (this.dtmfSentHandler) {
+      this.delegate!.onDtmfSent(this.dtmfSentHandler);
+    }
+
     return this.delegate!.connect(authParams, options);
   }
 
@@ -124,6 +130,18 @@ class BandwidthRtc {
     this.readyHandler = callback;
     if (this.delegate) {
       this.delegate.onReady(callback);
+    }
+  }
+
+  /**
+   * Set the function that will be called each time a DTMF tone is actually played
+   * on a published stream.
+   * @param callback callback function
+   */
+  onDtmfSent(callback: DtmfSentHandler): void {
+    this.dtmfSentHandler = callback;
+    if (this.delegate) {
+      this.delegate.onDtmfSent(callback);
     }
   }
 
