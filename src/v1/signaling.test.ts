@@ -109,6 +109,19 @@ describe("Signaling connect method", () => {
       expect(emitSpy).toHaveBeenCalledWith("established", testEvent);
     }
   });
+
+  test("should tear down a prior client before connecting again", async () => {
+    await signaling.connect({ endpointToken: "test-token" });
+    const firstWs = (signaling as any).ws;
+
+    await signaling.connect({ endpointToken: "test-token" });
+    const secondWs = (signaling as any).ws;
+
+    expect(firstWs.setAutoReconnect).toHaveBeenCalledWith(false);
+    expect(firstWs.removeAllListeners).toHaveBeenCalled();
+    expect(firstWs.close).toHaveBeenCalled();
+    expect(secondWs).not.toBe(firstWs);
+  });
 });
 
 describe("Signaling websocket event handlers", () => {
@@ -145,14 +158,28 @@ describe("Signaling websocket event handlers", () => {
     expect(ws.setAutoReconnect).toHaveBeenCalledWith(false);
   });
 
-  test("should handle non-403 error without throwing", async () => {
+  // A 409 means another device holds this endpoint. Retrying cannot succeed
+  // until that device leaves, and the client is configured with unlimited
+  // auto-reconnect, so it must be disabled or the SDK storms the gateway.
+  test("should reject with error and stop reconnecting on 409 error", async () => {
+    const errorCallback = getWsCallback("error");
+    expect(errorCallback).toBeDefined();
+
+    const ws = (signaling as any).ws;
+    errorCallback({ message: "Unexpected server response: 409" });
+
+    expect(ws.close).toHaveBeenCalledWith(409);
+    expect(ws.setAutoReconnect).toHaveBeenCalledWith(false);
+  });
+
+  test("should handle non-fatal error without throwing", async () => {
     const errorCallback = getWsCallback("error");
     expect(errorCallback).toBeDefined();
 
     // Should not throw on a generic error
     expect(() => errorCallback({ message: "some other error" })).not.toThrow();
 
-    // ws should not be closed on non-403 errors
+    // ws should not be closed on errors we can recover from by reconnecting
     const ws = (signaling as any).ws;
     expect(ws.setAutoReconnect).not.toHaveBeenCalled();
   });
