@@ -54,6 +54,16 @@ class Signaling extends EventEmitter {
     let rpc_id = 1;
 
     return new Promise<void>((resolve, reject) => {
+      if (this.ws) {
+        // A prior connect() left a client behind. Tear it down before replacing
+        // this.ws — otherwise the old client's unlimited auto-reconnect keeps
+        // running in the background forever. Its "open" handler calls
+        // setMediaPreferences() via this.ws, which by then points at the new
+        // client, so the orphaned socket never sends anything on its own
+        // connection and just sits idle until the gateway reaps it.
+        this._disconnect(false);
+      }
+
       let rtcOptions: RtcOptions = {
         websocketUrl: this.defaultWebsocketUrl,
       };

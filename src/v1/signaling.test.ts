@@ -109,6 +109,19 @@ describe("Signaling connect method", () => {
       expect(emitSpy).toHaveBeenCalledWith("established", testEvent);
     }
   });
+
+  test("should tear down a prior client before connecting again", async () => {
+    await signaling.connect({ endpointToken: "test-token" });
+    const firstWs = (signaling as any).ws;
+
+    await signaling.connect({ endpointToken: "test-token" });
+    const secondWs = (signaling as any).ws;
+
+    expect(firstWs.setAutoReconnect).toHaveBeenCalledWith(false);
+    expect(firstWs.removeAllListeners).toHaveBeenCalled();
+    expect(firstWs.close).toHaveBeenCalled();
+    expect(secondWs).not.toBe(firstWs);
+  });
 });
 
 describe("Signaling websocket event handlers", () => {
