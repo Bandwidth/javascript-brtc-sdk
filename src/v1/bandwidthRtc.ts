@@ -8,6 +8,7 @@ import logger, { LogLevel } from "../logging";
 import {
   AudioLevelChangeHandler,
   BandwidthRtcError,
+  DtmfSentHandler,
   EndpointType,
   HangupResult,
   MediaType,
@@ -91,6 +92,7 @@ export class BandwidthRtc {
   private streamAvailableHandler?: { (event: RtcStream): void };
   private streamUnavailableHandler?: { (event: RtcStream): void };
   private readyHandler?: { (readyMetadata: ReadyMetadata): void };
+  private dtmfSentHandler?: DtmfSentHandler;
 
   // Caller identity for pending subscribe tracks, keyed by track id. The gateway
   // negotiates a fresh subscribe track per call and rides the call's metadata on
@@ -165,6 +167,15 @@ export class BandwidthRtc {
    */
   onReady(callback: { (readyMetadata: ReadyMetadata): void }): void {
     this.readyHandler = callback;
+  }
+
+  /**
+   * Set the function that will be called each time a DTMF tone is actually played
+   * on a published stream (fires once per tone via the native RTCDTMFSender "tonechange" event).
+   * @param callback callback function
+   */
+  onDtmfSent(callback: DtmfSentHandler): void {
+    this.dtmfSentHandler = callback;
   }
 
   /**
@@ -741,6 +752,13 @@ export class BandwidthRtc {
       const dtmfSender = transceiver.sender.dtmf;
       if (track.kind === TRACK_KIND_AUDIO && dtmfSender && !this.localDtmfSenders.has(mediaStream.id)) {
         this.localDtmfSenders.set(mediaStream.id, dtmfSender);
+        // "tonechange" fires once per tone as it's actually played, and once more with
+        // an empty tone when the queue drains; only the former is a tone being "sent".
+        dtmfSender.addEventListener?.("tonechange", (event: RTCDTMFToneChangeEvent) => {
+          if (event.tone) {
+            this.dtmfSentHandler?.({ tone: event.tone, streamId: mediaStream.id });
+          }
+        });
       }
 
       if (track.kind === TRACK_KIND_AUDIO) {
