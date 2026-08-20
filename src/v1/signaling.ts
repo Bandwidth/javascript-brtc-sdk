@@ -7,6 +7,31 @@ import { EndpointType, HangupResult, OutboundConnectionResult, RtcAuthParams, Rt
 import { PublishSdpAnswer, PublishMetadata, ReadyMetadata, SetMediaPreferencesWebRtcResponse, SdpAnswer } from "./types";
 import { Diagnostics, DiagnosticsBatcher } from "./diagnostics";
 
+/**
+ * Handshake failures that will keep recurring for as long as the underlying
+ * condition holds, keyed by the `ws` error message for a non-101 response.
+ *
+ * The client is built with unlimited auto-reconnect, so without this the SDK
+ * retries these forever — several times a second against a gateway that is
+ * telling it, correctly, that the connection cannot be established. Reconnect
+ * is disabled and the error surfaced instead, leaving retry policy to the app.
+ *
+ * Note this only works under Node: browsers do not expose the HTTP status of a
+ * failed websocket upgrade to the error handler.
+ */
+const FATAL_HANDSHAKE_ERRORS: Record<string, { status: number; logMessage: string; error: string }> = {
+  "Unexpected server response: 403": {
+    status: 403,
+    logMessage: "Authentication error: Invalid token",
+    error: "Invalid token",
+  },
+  "Unexpected server response: 409": {
+    status: 409,
+    logMessage: "Endpoint already has an active connection from a different device",
+    error: "Endpoint already has an active connection",
+  },
+};
+
 class Signaling extends EventEmitter {
   private defaultWebsocketUrl: string = "wss://gateway.pv.prod.global.aws.bandwidth.com/prod/gateway-service/api/v1/endpoints";
   private ws: JsonRpcClient | null = null;
@@ -86,13 +111,15 @@ class Signaling extends EventEmitter {
       });
 
       ws.on("error", (error: ErrorEvent) => {
-        if (error.message === "Unexpected server response: 403") {
-          logger.error("Authentication error: Invalid token");
-          ws.close(403);
+        const fatal = FATAL_HANDSHAKE_ERRORS[error.message];
+        if (fatal) {
+          logger.error(fatal.logMessage);
+          ws.close(fatal.status);
           ws.setAutoReconnect(false);
-          reject(new Error("Invalid token"));
+          reject(new Error(fatal.error));
           // Disconnect without calling leave since we are not connected
           this._disconnect(false);
+          return;
         }
         // TODO: make this a more informative error message
         logger.error(`Websocket error: ${error.message}`);
