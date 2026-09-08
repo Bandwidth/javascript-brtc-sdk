@@ -412,7 +412,13 @@ export class BandwidthRtc {
     const ICE_RESTART_RETRY_INTERVAL_MS = 5_000;
     const startTime = Date.now();
 
-    const retryOffer = () => this.offerPublishSdp(true).catch((err) => logger.warn("ICE restart offer failed", err));
+    const retryOffer = async () => {
+      try {
+        await this.offerPublishSdp(true);
+      } catch (err) {
+        logger.warn("ICE restart offer failed", err);
+      }
+    };
 
     await retryOffer();
     let connectionState = pc.connectionState;
