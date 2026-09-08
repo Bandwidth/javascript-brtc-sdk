@@ -57,8 +57,7 @@ const CONNECTION_STATE_FAILED = "failed";
 const CONNECTION_STATE_DISCONNECTED = "disconnected";
 
 // When true, automatically trigger an ICE restart (via offerPublishSdp(true)) on connection failure.
-// Disabled by default until the retry loop is production-hardened with a proper timeout/backoff.
-const RETRY_ICE_ON_FAILED = false;
+const RETRY_ICE_ON_FAILED = true;
 
 export class BandwidthRtc {
   private options?: RtcOptions;
@@ -396,8 +395,16 @@ export class BandwidthRtc {
   }
 
   // Re-publishes the SDP with iceRestart=true to trigger ICE renegotiation after a connection failure.
-  private async retryIceOnFailed(pc: RTCPeerConnection, shouldRetry: boolean): Promise<void> {
+  private async retryIceOnFailed(pc: RTCPeerConnection, peerConnectionType: string, shouldRetry: boolean): Promise<void> {
     if (!shouldRetry) {
+      return;
+    }
+    if (peerConnectionType !== PEER_CONNECTION_TYPE_PUBLISH) {
+      // The subscribing peer connection never creates its own SDP offer - the gateway always
+      // initiates that renegotiation - so there's no client-side offer to re-send with
+      // iceRestart=true here. offerPublishSdp() only ever acts on publishingPeerConnection,
+      // so calling it here would incorrectly restart the *other* (unfailed) connection.
+      logger.warn(`ICE restart on the ${peerConnectionType} peer connection requires the gateway to re-offer; client cannot initiate`);
       return;
     }
 
@@ -405,7 +412,9 @@ export class BandwidthRtc {
     const ICE_RESTART_RETRY_INTERVAL_MS = 5_000;
     const startTime = Date.now();
 
-    await this.offerPublishSdp(true);
+    const retryOffer = () => this.offerPublishSdp(true).catch((err) => logger.warn("ICE restart offer failed", err));
+
+    await retryOffer();
     let connectionState = pc.connectionState;
     while (connectionState === CONNECTION_STATE_FAILED) {
       if (Date.now() - startTime >= ICE_RESTART_TIMEOUT_MS) {
@@ -414,7 +423,7 @@ export class BandwidthRtc {
       }
       await new Promise((resolve) => setTimeout(resolve, ICE_RESTART_RETRY_INTERVAL_MS));
       // Don't block on this, we should try multiple times
-      this.offerPublishSdp(true);
+      retryOffer();
       connectionState = pc.connectionState;
     }
   }
@@ -519,7 +528,20 @@ export class BandwidthRtc {
     }
   }
 
-  public async init(setMediaPreferencesResponse: SetMediaPreferencesWebRtcResponse) {
+  public async init(setMediaPreferencesResponse: SetMediaPreferencesWebRtcResponse, isReconnect: boolean = false) {
+    if (isReconnect) {
+      // The signaling websocket reconnected (e.g. a gateway-initiated 1001 that expects the
+      // same endpoint to keep going, not a fresh connect()). The old peer connections are
+      // stale, so rebuild them and re-publish whatever was already being sent instead of
+      // silently losing media.
+      logger.info("Signaling reconnected; rebuilding peer connections and re-publishing existing streams");
+      this.publishingPeerConnection?.close();
+      this.subscribingPeerConnection?.close();
+      this.subscribingPeerConnectionSdpRevision = 0;
+      this.subscribeTrackMetadata.clear();
+      this.localDtmfSenders.clear();
+    }
+
     const publishOnTrackHandler = (event: RTCTrackEvent) => {
       logger.debug("publish ontrack event", event);
     };
@@ -528,6 +550,16 @@ export class BandwidthRtc {
       publishOnTrackHandler,
       setMediaPreferencesResponse.publishSdpOffer.sdpOffer,
     );
+
+    if (isReconnect && this.publishedStreams.size > 0) {
+      // The new publishing peer connection starts with no tracks; re-add whatever was
+      // already published so the gateway (and far end) keep receiving media instead of
+      // silence. Per-stream codecPreferences aren't retained across a reconnect.
+      for (const publishedStream of this.publishedStreams.values()) {
+        this.addStreamToPublishingPeerConnection(publishedStream.mediaStream);
+      }
+      await this.offerPublishSdp();
+    }
 
     let streamTracks: Map<MediaStream, Set<MediaStreamTrack>> = new Map();
 
@@ -629,9 +661,11 @@ export class BandwidthRtc {
         const pc = event.target as RTCPeerConnection;
         const connectionState = pc.connectionState;
         logger.debug("onconnectionstatechange", connectionState, pc);
-        if (connectionState === CONNECTION_STATE_FAILED) {
+        if (connectionState === CONNECTION_STATE_DISCONNECTED) {
+          logger.warn("Peer disconnected, connection may be reestablished");
+        } else if (connectionState === CONNECTION_STATE_FAILED) {
           logger.warn("Connection failed, ICE restart required");
-          await this.retryIceOnFailed(pc, RETRY_ICE_ON_FAILED);
+          await this.retryIceOnFailed(pc, peerConnectionType, RETRY_ICE_ON_FAILED);
         }
       } catch (err) {
         if (globalThis.window) {
@@ -674,21 +708,6 @@ export class BandwidthRtc {
       } else {
         logger.info("Custom Data Channel opened", dataChannel);
         // TODO: custom data channel
-      }
-    };
-
-    peerConnection.onconnectionstatechange = (event) => {
-      try {
-        const pc = event.target as RTCPeerConnection;
-        logger.debug("onconnectionstatechange", pc.connectionState, pc);
-        const connectionState = pc.connectionState;
-        if (connectionState === CONNECTION_STATE_DISCONNECTED) {
-          logger.warn("Peer disconnected, connection may be reestablished");
-        }
-      } catch (err) {
-        if (globalThis.window) {
-          logger.warn("onconnectionstatechange error", err);
-        }
       }
     };
 
