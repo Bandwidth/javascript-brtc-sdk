@@ -674,9 +674,7 @@ export class BandwidthRtc {
           await this.retryIceOnFailed(pc, peerConnectionType, RETRY_ICE_ON_FAILED);
         }
       } catch (err) {
-        if (globalThis.window) {
-          logger.warn("onconnectionstatechange error", err);
-        }
+        logger.warn("onconnectionstatechange error", err);
       }
     };
     logger.debug("Initial SDP offer", initialSdpOffer);
@@ -722,9 +720,7 @@ export class BandwidthRtc {
         const pc = event.target as RTCPeerConnection;
         logger.debug("oniceconnectionstatechange", pc.iceConnectionState, pc);
       } catch (err) {
-        if (globalThis.window) {
-          logger.warn("oniceconnectionstatechange error", err);
-        }
+        logger.warn("oniceconnectionstatechange error", err);
       }
     };
 
@@ -733,9 +729,7 @@ export class BandwidthRtc {
         const pc = event.target as RTCPeerConnection;
         logger.debug("onicegatheringstatechange", pc.iceGatheringState, pc);
       } catch (err) {
-        if (globalThis.window) {
-          logger.warn("onicegatheringstatechange error", err);
-        }
+        logger.warn("onicegatheringstatechange error", err);
       }
     };
 
@@ -743,9 +737,7 @@ export class BandwidthRtc {
       try {
         logger.debug("onnegotiationneeded", event.target);
       } catch (err) {
-        if (globalThis.window) {
-          logger.warn("onnegotiationneeded error", err);
-        }
+        logger.warn("onnegotiationneeded error", err);
       }
     };
 
@@ -754,9 +746,7 @@ export class BandwidthRtc {
         const pc = event.target as RTCPeerConnection;
         logger.debug("onsignalingstatechange", pc.signalingState, pc);
       } catch (err) {
-        if (globalThis.window) {
-          logger.warn("onsignalingstatechange error", err);
-        }
+        logger.warn("onsignalingstatechange error", err);
       }
     };
 
