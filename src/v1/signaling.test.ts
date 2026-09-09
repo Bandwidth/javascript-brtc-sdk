@@ -172,6 +172,17 @@ describe("Signaling websocket event handlers", () => {
     expect(ws.setAutoReconnect).toHaveBeenCalledWith(false);
   });
 
+  // On a reconnect the connect() promise has already resolved, so the reject is a
+  // no-op: the event is the only thing that reaches the application.
+  test("should emit fatalError on a fatal handshake error", async () => {
+    const emitSpy = jest.spyOn(signaling, "emit");
+    const errorCallback = getWsCallback("error");
+
+    errorCallback({ message: "Unexpected server response: 409" });
+
+    expect(emitSpy).toHaveBeenCalledWith("fatalError", expect.any(Error));
+  });
+
   test("should handle non-fatal error without throwing", async () => {
     const errorCallback = getWsCallback("error");
     expect(errorCallback).toBeDefined();

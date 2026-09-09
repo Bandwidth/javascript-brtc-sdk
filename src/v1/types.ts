@@ -67,6 +67,17 @@ export interface DataChannelPublishMetadata {
 export interface PublishedStream {
   mediaStream: MediaStream;
   metadata?: StreamPublishMetadata;
+  /**
+   * Codec preferences the stream was originally published with. Retained so a
+   * republish after a reconnect negotiates the same codecs as the first publish.
+   */
+  codecPreferences?: CodecPreferences;
+  /**
+   * Constraints the stream was acquired with, when the SDK acquired it. Retained
+   * so tracks that ended while the websocket was down can be re-acquired from the
+   * same devices. Undefined when the application supplied its own MediaStream.
+   */
+  constraints?: MediaStreamConstraints;
 }
 
 export interface PublishMetadata {

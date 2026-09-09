@@ -127,6 +127,10 @@ class Signaling extends EventEmitter {
           ws.close(fatal.status);
           ws.setAutoReconnect(false);
           reject(new Error(fatal.error));
+          // On a reconnect the connect() promise has long since resolved, so the
+          // reject above goes nowhere and the application is left holding a session
+          // that will never come back. Surface it as an event too.
+          this.emit("fatalError", new Error(fatal.error));
           // Disconnect without calling leave since we are not connected
           this._disconnect(false);
           return;

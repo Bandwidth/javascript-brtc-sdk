@@ -272,6 +272,216 @@ describe("bandwidthRtcV1 addStreamToPublishingPeerConnection", () => {
   });
 });
 
+describe("bandwidthRtcV1 init reconnect replay", () => {
+  function stubSetupPeerConnection(brtc: BandwidthRtc) {
+    // init() only needs a stand-in RTCPeerConnection; the real
+    // negotiation performed by setupPeerConnection is exercised elsewhere.
+    (brtc as any).setupPeerConnection = jest.fn().mockResolvedValue({});
+  }
+
+  function makeTrack(kind: string, readyState: string = "live") {
+    return { kind, id: `${kind}-track`, readyState, stop: jest.fn() };
+  }
+
+  function makeLiveStream(id: string, tracks: any[] = [makeTrack("audio")]) {
+    return {
+      id,
+      getTracks: () => tracks,
+      addTrack: jest.fn((track: any) => tracks.push(track)),
+      removeTrack: jest.fn((track: any) => tracks.splice(tracks.indexOf(track), 1)),
+    } as any;
+  }
+
+  test("does not replay when no streams were previously published (first connect)", async () => {
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    const addSpy = jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection");
+    const offerSpy = jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+
+    expect(addSpy).not.toHaveBeenCalled();
+    expect(offerSpy).not.toHaveBeenCalled();
+  });
+
+  test("re-attaches previously published streams to the new publishing peer connection on reconnect", async () => {
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    const addSpy = jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    const offerSpy = jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    const mediaStream = makeLiveStream("stream-1");
+    (brtc as any).publishedStreams.set(mediaStream.id, { mediaStream });
+
+    // Simulate the websocket "open" handler re-emitting "init" after a reconnect.
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+
+    expect(addSpy).toHaveBeenCalledWith(mediaStream, undefined);
+    expect(offerSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("renegotiates exactly once for all replayed streams", async () => {
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    const addSpy = jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    const offerSpy = jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    for (const id of ["stream-1", "stream-2", "stream-3"]) {
+      (brtc as any).publishedStreams.set(id, { mediaStream: makeLiveStream(id) });
+    }
+
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+
+    expect(addSpy).toHaveBeenCalledTimes(3);
+    expect(offerSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("replays with the codec preferences the stream was originally published with", async () => {
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    const addSpy = jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    const codecPreferences = { audio: [{ mimeType: "audio/opus", clockRate: 48000 }] };
+    const mediaStream = makeLiveStream("stream-1");
+    (brtc as any).publishedStreams.set(mediaStream.id, { mediaStream, codecPreferences });
+
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+
+    expect(addSpy).toHaveBeenCalledWith(mediaStream, codecPreferences);
+  });
+
+  test("publish retains codec preferences and constraints for a later replay", async () => {
+    const { mockGetUserMedia } = setupNavigatorMocks();
+    setupMocks();
+    const brtc = new BandwidthRtc();
+    (brtc as any).publishingPeerConnection = {};
+    jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    const mediaStream = makeLiveStream("stream-1");
+    mockGetUserMedia.mockResolvedValue(mediaStream);
+    const constraints = { audio: true, video: false };
+    const codecPreferences = { audio: [{ mimeType: "audio/opus", clockRate: 48000 }] };
+
+    await brtc.publish(constraints as any, undefined, undefined, codecPreferences as any);
+
+    const published = (brtc as any).publishedStreams.get("stream-1");
+    expect(published.codecPreferences).toBe(codecPreferences);
+    expect(published.constraints).toBe(constraints);
+  });
+
+  test("re-acquires tracks that ended while disconnected instead of re-attaching them dead", async () => {
+    const { mockGetUserMedia } = setupNavigatorMocks();
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    const addSpy = jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    const endedTrack = makeTrack("audio", "ended");
+    const mediaStream = makeLiveStream("stream-1", [endedTrack]);
+    const constraints = { audio: true, video: false };
+    (brtc as any).publishedStreams.set(mediaStream.id, { mediaStream, constraints });
+
+    const freshTrack = makeTrack("audio");
+    mockGetUserMedia.mockResolvedValue({ getTracks: () => [freshTrack] });
+
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+
+    // Re-acquired from the same constraints, swapped into the same MediaStream the
+    // application already holds, and the dead track dropped.
+    expect(mockGetUserMedia).toHaveBeenCalledWith(constraints);
+    expect(mediaStream.removeTrack).toHaveBeenCalledWith(endedTrack);
+    expect(mediaStream.addTrack).toHaveBeenCalledWith(freshTrack);
+    expect(mediaStream.getTracks()).toEqual([freshTrack]);
+    expect(addSpy).toHaveBeenCalledWith(mediaStream, undefined);
+  });
+
+  test("does not re-acquire when every track is still live", async () => {
+    const { mockGetUserMedia } = setupNavigatorMocks();
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    const mediaStream = makeLiveStream("stream-1");
+    (brtc as any).publishedStreams.set(mediaStream.id, { mediaStream });
+
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+
+    expect(mockGetUserMedia).not.toHaveBeenCalled();
+  });
+
+  test("derives re-acquisition constraints from track kinds when the application supplied the stream", async () => {
+    const { mockGetUserMedia } = setupNavigatorMocks();
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    // No constraints retained: the stream came from the application, not getUserMedia.
+    const mediaStream = makeLiveStream("stream-1", [makeTrack("audio", "ended")]);
+    (brtc as any).publishedStreams.set(mediaStream.id, { mediaStream });
+    mockGetUserMedia.mockResolvedValue({ getTracks: () => [makeTrack("audio")] });
+
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+
+    expect(mockGetUserMedia).toHaveBeenCalledWith({ audio: true, video: false });
+  });
+
+  test("drops DTMF senders from the closed peer connection before replaying", async () => {
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    const mediaStream = makeLiveStream("stream-1");
+    (brtc as any).publishedStreams.set(mediaStream.id, { mediaStream });
+    (brtc as any).localDtmfSenders.set(mediaStream.id, { insertDTMF: jest.fn(), canInsertDTMF: true });
+
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+
+    expect((brtc as any).localDtmfSenders.size).toBe(0);
+  });
+
+  test("reports a republish failure to the application instead of failing silently", async () => {
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    jest.spyOn(brtc as any, "offerPublishSdp").mockRejectedValue(new Error("gateway said no"));
+
+    const errorHandler = jest.fn();
+    brtc.onError(errorHandler);
+
+    const mediaStream = makeLiveStream("stream-1");
+    (brtc as any).publishedStreams.set(mediaStream.id, { mediaStream });
+
+    await expect(brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any)).resolves.toBeUndefined();
+
+    expect(errorHandler).toHaveBeenCalledTimes(1);
+    expect(errorHandler.mock.calls[0][0].message).toContain("gateway said no");
+  });
+
+  test("reports a re-acquisition failure to the application", async () => {
+    const { mockGetUserMedia } = setupNavigatorMocks();
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    const offerSpy = jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    const errorHandler = jest.fn();
+    brtc.onError(errorHandler);
+
+    const mediaStream = makeLiveStream("stream-1", [makeTrack("audio", "ended")]);
+    (brtc as any).publishedStreams.set(mediaStream.id, { mediaStream });
+    mockGetUserMedia.mockRejectedValue(new Error("NotAllowedError"));
+
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+
+    expect(errorHandler).toHaveBeenCalledTimes(1);
+    expect(offerSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe("bandwidthRtcV1 connect method", () => {
   beforeAll(() => {
     setupNavigatorMocks();
@@ -301,5 +511,17 @@ describe("bandwidthRtcV1 connect method", () => {
     expect(signaling.on).toHaveBeenCalledWith("ready", expect.any(Function));
     expect(signaling.on).toHaveBeenCalledWith("sdpOffer", expect.any(Function));
     expect(signaling.on).toHaveBeenCalledWith("init", expect.any(Function));
+    expect(signaling.on).toHaveBeenCalledWith("fatalError", expect.any(Function));
+  });
+
+  test("forwards a fatal signaling error to the application error handler", () => {
+    const bandwidthRtc = new BandwidthRtc("debug");
+    const errorHandler = jest.fn();
+    bandwidthRtc.onError(errorHandler);
+
+    const error = new Error("Endpoint already has an active connection");
+    (bandwidthRtc as any).handleError(error);
+
+    expect(errorHandler).toHaveBeenCalledWith(error);
   });
 });
