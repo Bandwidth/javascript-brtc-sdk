@@ -208,10 +208,6 @@ describe("Signaling websocket event handlers", () => {
     expect((signaling as any).isReady).toBe(false);
   });
 
-  // 1001 is the only close code the gateway sends to say "come back on this
-  // same session" (drain eviction, lost media server, etc). Everything else
-  // must tear the connection down rather than let rpc-websockets' unlimited
-  // auto-reconnect keep hammering a connection that isn't coming back.
   test("should not disconnect on the retryable close code 1001", async () => {
     const closeCallback = getWsCallback("close");
     expect(closeCallback).toBeDefined();
@@ -223,11 +219,7 @@ describe("Signaling websocket event handlers", () => {
     expect(ws.setAutoReconnect).not.toHaveBeenCalled();
   });
 
-  test.each([
-    [4409, "superseded by a newer connection from the same device"],
-    [1011, "gateway internal error"],
-    [4000, "an unrecognized close code"],
-  ])("should disable auto-reconnect and disconnect on close code %d (%s)", async (code) => {
+  test.each([4409, 1011, 4000])("should disable auto-reconnect and disconnect on close code %d", async (code) => {
     const ws = (signaling as any).ws;
     const closeCallback = getWsCallback("close");
     expect(closeCallback).toBeDefined();
