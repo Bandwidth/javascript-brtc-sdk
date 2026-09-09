@@ -223,73 +223,43 @@ class Signaling extends EventEmitter {
     this._disconnect(true);
   }
 
-  async requestOutboundConnection(id: string, type: EndpointType): Promise<OutboundConnectionResult> {
+  requestOutboundConnection(id: string, type: EndpointType): Promise<OutboundConnectionResult> {
     logger.debug(`Calling "requestOutboundConnection"`, { id: id, type: type });
-    try {
-      return await (this.ws?.call("requestOutboundConnection", {
-        id: id,
-        type: type,
-      }) as Promise<OutboundConnectionResult>);
-    } catch (err) {
-      logger.warn(`"requestOutboundConnection" rejected`, err);
-      throw err;
-    }
+    return this.ws?.call("requestOutboundConnection", {
+      id: id,
+      type: type,
+    }) as Promise<OutboundConnectionResult>;
   }
 
-  async hangupConnection(endpoint: string, type: EndpointType): Promise<HangupResult> {
+  hangupConnection(endpoint: string, type: EndpointType): Promise<HangupResult> {
     logger.debug(`Calling "hangupConnection"`, { endpoint: endpoint, type: type });
-    try {
-      return await (this.ws?.call("hangupConnection", {
-        endpoint: endpoint,
-        type: type,
-      }) as Promise<HangupResult>);
-    } catch (err) {
-      logger.warn(`"hangupConnection" rejected`, err);
-      throw err;
-    }
+    return this.ws?.call("hangupConnection", {
+      endpoint: endpoint,
+      type: type,
+    }) as Promise<HangupResult>;
   }
 
-  async acceptStream(): Promise<void> {
+  acceptStream(): Promise<void> {
     logger.debug(`Calling "acceptStream"`);
-    try {
-      return await (this.ws?.call("acceptStream", {}) as Promise<void>);
-    } catch (err) {
-      logger.warn(`"acceptStream" rejected`, err);
-      throw err;
-    }
+    return this.ws?.call("acceptStream", {}) as Promise<void>;
   }
 
-  async declineStream(): Promise<void> {
+  declineStream(): Promise<void> {
     logger.debug(`Calling "declineStream"`);
-    try {
-      return await (this.ws?.call("declineStream", {}) as Promise<void>);
-    } catch (err) {
-      logger.warn(`"declineStream" rejected`, err);
-      throw err;
-    }
+    return this.ws?.call("declineStream", {}) as Promise<void>;
   }
 
-  async offerSdp(peerType: string, sdpOffer: string): Promise<SdpAnswer> {
+  offerSdp(peerType: string, sdpOffer: string): Promise<SdpAnswer> {
     logger.debug(`Calling "offerSdp"`, { sdpOffer: sdpOffer, peerType: peerType });
-    try {
-      return await (this.ws?.call("offerSdp", { sdpOffer: sdpOffer, peerType: peerType }) as Promise<SdpAnswer>);
-    } catch (err) {
-      logger.warn(`"offerSdp" rejected`, err);
-      throw err;
-    }
+    return this.ws?.call("offerSdp", { sdpOffer: sdpOffer, peerType: peerType }) as Promise<SdpAnswer>;
   }
 
-  async answerSdp(sdpAnswer: string, peerType: string): Promise<void> {
+  answerSdp(sdpAnswer: string, peerType: string): Promise<void> {
     logger.debug(`Calling "answerSdp"`, { sdpAnswer: sdpAnswer });
-    try {
-      return await (this.ws?.call("answerSdp", {
-        peerType: peerType,
-        sdpAnswer: sdpAnswer,
-      }) as Promise<void>);
-    } catch (err) {
-      logger.warn(`"answerSdp" rejected`, err);
-      throw err;
-    }
+    return this.ws?.call("answerSdp", {
+      peerType: peerType,
+      sdpAnswer: sdpAnswer,
+    }) as Promise<void>;
   }
 
   private sendDiagnostics(diagnostics: Diagnostics): Promise<void> {
