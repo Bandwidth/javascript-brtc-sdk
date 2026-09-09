@@ -32,6 +32,21 @@ const FATAL_HANDSHAKE_ERRORS: Record<string, { status: number; logMessage: strin
   },
 };
 
+/**
+ * The only close code that should trigger a reconnect on this same client
+ * instance: 1001 (Going Away) is the gateway explicitly telling this session
+ * to come back (drain eviction, lost media server, etc.).
+ *
+ * Every other code tears the connection down for good, including codes we
+ * don't otherwise recognize: 1000 means the endpoint is gone; 4409 means a
+ * newer connection from this same device already took over, so reconnecting
+ * here would just fight the one that won; 1011 (internal error) means retrying
+ * this same connection isn't the right recovery — the app should mint a new
+ * endpoint and start over, not have this client silently keep hammering the
+ * same one.
+ */
+const RETRY_CLOSE_CODES = new Set([1001]);
+
 class Signaling extends EventEmitter {
   private defaultWebsocketUrl: string = "wss://gateway.pv.prod.global.aws.bandwidth.com/prod/gateway-service/api/v1/endpoints";
   private ws: JsonRpcClient | null = null;
@@ -143,7 +158,17 @@ class Signaling extends EventEmitter {
         if (this.pingInterval) {
           clearInterval(this.pingInterval);
         }
-        if (code == 1000) {
+        if (!RETRY_CLOSE_CODES.has(code)) {
+          // rpc-websockets decides whether to schedule a reconnect synchronously,
+          // inside the underlying socket's own "close" listener — before it even
+          // fires the "close" event we're handling here (that emit is deferred via
+          // setTimeout). For code 1000 the library's own check already skips
+          // scheduling one, but for any other non-retryable code the reconnect
+          // timer is already queued by the time we get here, so setAutoReconnect(false)
+          // alone is too late. Clearing the client's own timer handle is the only
+          // way to stop it from firing.
+          clearTimeout((ws as any).reconnect_timer_id);
+          ws.setAutoReconnect(false);
           // We were asked to go away and not come back. We should disconnect without calling leave.
           this._disconnect(false);
         }
