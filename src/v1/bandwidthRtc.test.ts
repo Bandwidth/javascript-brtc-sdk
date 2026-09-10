@@ -282,8 +282,8 @@ describe("bandwidthRtcV1 init reconnect replay", () => {
     return pc;
   }
 
-  function makeTrack(kind: string, readyState: string = "live") {
-    return { kind, id: `${kind}-track`, readyState, stop: jest.fn() };
+  function makeTrack(kind: string, readyState: string = "live", enabled: boolean = true) {
+    return { kind, id: `${kind}-track`, readyState, enabled, stop: jest.fn() };
   }
 
   function makeLiveStream(id: string, tracks: any[] = [makeTrack("audio")]) {
@@ -436,9 +436,9 @@ describe("bandwidthRtcV1 init reconnect replay", () => {
 
     await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
 
-    // Re-acquired from the same constraints, swapped into the same MediaStream the
-    // application already holds, and the dead track dropped.
-    expect(mockGetUserMedia).toHaveBeenCalledWith(constraints);
+    // Re-acquired using the stored constraints' audio settings, but only for the kind
+    // that actually ended - video is left out entirely rather than requested as false.
+    expect(mockGetUserMedia).toHaveBeenCalledWith({ audio: true });
     expect(mediaStream.removeTrack).toHaveBeenCalledWith(endedTrack);
     expect(mediaStream.addTrack).toHaveBeenCalledWith(freshTrack);
     expect(mediaStream.getTracks()).toEqual([freshTrack]);
@@ -474,7 +474,7 @@ describe("bandwidthRtcV1 init reconnect replay", () => {
 
     await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
 
-    expect(mockGetUserMedia).toHaveBeenCalledWith({ audio: true, video: false });
+    expect(mockGetUserMedia).toHaveBeenCalledWith({ audio: true });
   });
 
   test("drops DTMF senders from the closed peer connection before replaying", async () => {
@@ -527,6 +527,93 @@ describe("bandwidthRtcV1 init reconnect replay", () => {
 
     expect(errorHandler).toHaveBeenCalledTimes(1);
     expect(offerSpy).not.toHaveBeenCalled();
+  });
+
+  test("carries over a muted track's enabled=false onto its replacement", async () => {
+    const { mockGetUserMedia } = setupNavigatorMocks();
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    const mutedEndedTrack = makeTrack("audio", "ended", false);
+    const mediaStream = makeLiveStream("stream-1", [mutedEndedTrack]);
+    (brtc as any).publishedStreams.set(mediaStream.id, { mediaStream });
+
+    const freshTrack = makeTrack("audio");
+    mockGetUserMedia.mockResolvedValue({ getTracks: () => [freshTrack] });
+
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+
+    expect(freshTrack.enabled).toBe(false);
+  });
+
+  test("one stream's reacquisition failure does not block another stream's replay", async () => {
+    const { mockGetUserMedia } = setupNavigatorMocks();
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    const addSpy = jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    const offerSpy = jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    const errorHandler = jest.fn();
+    brtc.onError(errorHandler);
+
+    const brokenStream = makeLiveStream("stream-broken", [makeTrack("audio", "ended")]);
+    const healthyStream = makeLiveStream("stream-healthy");
+    (brtc as any).publishedStreams.set(brokenStream.id, { mediaStream: brokenStream });
+    (brtc as any).publishedStreams.set(healthyStream.id, { mediaStream: healthyStream });
+    mockGetUserMedia.mockRejectedValue(new Error("NotAllowedError"));
+
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+
+    // The healthy stream still gets attached and renegotiated...
+    expect(addSpy).toHaveBeenCalledWith(healthyStream, undefined);
+    expect(offerSpy).toHaveBeenCalledTimes(1);
+    // ...and the broken one is skipped, not attached dead.
+    expect(addSpy).not.toHaveBeenCalledWith(brokenStream, undefined);
+    expect(errorHandler).toHaveBeenCalledTimes(1);
+  });
+
+  test("an onError handler that throws does not become an unhandled rejection", async () => {
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    jest.spyOn(brtc as any, "offerPublishSdp").mockRejectedValue(new Error("gateway said no"));
+
+    brtc.onError(() => {
+      throw new Error("app handler blew up");
+    });
+
+    const mediaStream = makeLiveStream("stream-1");
+    (brtc as any).publishedStreams.set(mediaStream.id, { mediaStream });
+
+    await expect(brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any)).resolves.toBeUndefined();
+  });
+
+  test("concurrent init() calls are serialized rather than interleaved", async () => {
+    const brtc = new BandwidthRtc();
+    const order: string[] = [];
+    let callNum = 0;
+    (brtc as any).setupPeerConnection = jest.fn().mockImplementation(async () => {
+      const n = ++callNum;
+      order.push(`start-${n}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      order.push(`end-${n}`);
+      return { connectionState: "connected", close: jest.fn() };
+    });
+    jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    await Promise.all([
+      brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any),
+      brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any),
+    ]);
+
+    // setupPeerConnection is called twice per init() call (publish, then subscribe).
+    // If the two init() calls ran concurrently, a later call's "start" could land
+    // between an earlier call's "start" and "end". Serialized, every start/end pair
+    // is contiguous regardless of which init() call it belongs to.
+    expect(order).toEqual(["start-1", "end-1", "start-2", "end-2", "start-3", "end-3", "start-4", "end-4"]);
   });
 });
 

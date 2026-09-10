@@ -57,6 +57,7 @@ const DATA_CHANNEL_STATE_OPEN = "open";
 const CONNECTION_STATE_FAILED = "failed";
 const CONNECTION_STATE_DISCONNECTED = "disconnected";
 const CONNECTION_STATE_CONNECTED = "connected";
+const CONNECTION_STATE_CLOSED = "closed";
 
 /** How long to wait for the publish peer connection's ICE handshake before giving up. */
 const PUBLISH_ICE_CONNECT_TIMEOUT_MS = 10_000;
@@ -86,6 +87,12 @@ export class BandwidthRtc {
   // Prevents concurrent modification to RTCPeerConnection state (can cause race conditions)
   private publishMutex: Mutex = new Mutex();
   private subscribeMutex: Mutex = new Mutex();
+  // init() is signaling-driven ("init" fires on every (re)open), so two closely-spaced
+  // reconnects can otherwise run init() concurrently: the second overwrites
+  // publishingPeerConnection/subscribingPeerConnection out from under the first, which is
+  // still polling the old one in waitForPublishConnected. Serializing init() end-to-end means
+  // there is only ever one publishing/subscribing peer connection in flight at a time.
+  private initMutex: Mutex = new Mutex();
 
   private publishedStreams: Map<string, PublishedStream> = new Map();
   private subscribedStreams: Map<string, StreamMetadata> = new Map();
@@ -544,9 +551,16 @@ export class BandwidthRtc {
   }
 
   public async init(setMediaPreferencesResponse: SetMediaPreferencesWebRtcResponse) {
+    return this.initMutex.runExclusive(() => this.doInit(setMediaPreferencesResponse));
+  }
+
+  private async doInit(setMediaPreferencesResponse: SetMediaPreferencesWebRtcResponse) {
     const publishOnTrackHandler = (event: RTCTrackEvent) => {
       logger.debug("publish ontrack event", event);
     };
+    // A reconnect re-runs init() against a fresh offer; the previous peer connection (if any)
+    // is already dead on the far end, but nothing local closes it, so it leaks otherwise.
+    this.publishingPeerConnection?.close();
     this.publishingPeerConnection = await this.setupPeerConnection(
       PEER_CONNECTION_TYPE_PUBLISH,
       publishOnTrackHandler,
@@ -633,6 +647,7 @@ export class BandwidthRtc {
         tags: metadata?.tags,
       });
     };
+    this.subscribingPeerConnection?.close();
     this.subscribingPeerConnection = await this.setupPeerConnection(
       PEER_CONNECTION_TYPE_SUBSCRIBE,
       subscriptionOnTrackHandler,
@@ -671,20 +686,42 @@ export class BandwidthRtc {
       // The senders these were taken from belong to the closed peer connection.
       this.localDtmfSenders.clear();
 
+      // Each stream is reacquired/attached independently: one stream's getUserMedia
+      // rejection (an unplugged device, a revoked permission) must not prevent every
+      // other stream from being attached, nor skip the renegotiation entirely.
+      const reacquireErrors: unknown[] = [];
+      let attachedCount = 0;
       for (const publishedStream of [...this.publishedStreams.values()]) {
-        await this.reacquireEndedTracks(publishedStream);
-        this.addStreamToPublishingPeerConnection(publishedStream.mediaStream, publishedStream.codecPreferences);
+        try {
+          await this.reacquireEndedTracks(publishedStream);
+          this.addStreamToPublishingPeerConnection(publishedStream.mediaStream, publishedStream.codecPreferences);
+          attachedCount++;
+        } catch (err) {
+          logger.error(`Failed to reacquire ended tracks for stream ${publishedStream.mediaStream.id}`, err);
+          reacquireErrors.push(err);
+        }
       }
 
-      // One renegotiation covers every re-attached stream.
-      await this.offerPublishSdp();
+      // One renegotiation covers every re-attached stream. Skip it entirely if nothing
+      // was actually attached - there is nothing to renegotiate.
+      if (attachedCount > 0) {
+        await this.offerPublishSdp();
+      }
+
+      if (reacquireErrors.length > 0) {
+        throw new BandwidthRtcError(`Failed to reacquire tracks for ${reacquireErrors.length} stream(s): ${reacquireErrors.join(", ")}`);
+      }
     } catch (err) {
       logger.error("Failed to republish streams after reconnect", err);
       this.handleError(new BandwidthRtcError(`Failed to republish streams after reconnect: ${err}`));
     }
   }
 
-  /** Poll until the publish peer connection reaches "connected", or throw after the timeout. */
+  /**
+   * Poll until the publish peer connection reaches "connected", or throw after the timeout.
+   * "failed"/"closed" are unrecoverable - bail immediately instead of waiting out the full
+   * timeout for a peer connection that will never reach "connected".
+   */
   private async waitForPublishConnected(): Promise<void> {
     const pc = this.publishingPeerConnection;
     if (!pc) {
@@ -693,6 +730,9 @@ export class BandwidthRtc {
 
     const startTime = Date.now();
     while (pc.connectionState !== CONNECTION_STATE_CONNECTED) {
+      if (pc.connectionState === CONNECTION_STATE_FAILED || pc.connectionState === CONNECTION_STATE_CLOSED) {
+        throw new BandwidthRtcError(`Publish peer connection reached unrecoverable state "${pc.connectionState}"`);
+      }
       if (Date.now() - startTime >= PUBLISH_ICE_CONNECT_TIMEOUT_MS) {
         throw new BandwidthRtcError(
           `Publish peer connection did not reach "connected" within ${PUBLISH_ICE_CONNECT_TIMEOUT_MS}ms (state: ${pc.connectionState})`,
@@ -714,20 +754,34 @@ export class BandwidthRtc {
    */
   private async reacquireEndedTracks(publishedStream: PublishedStream): Promise<void> {
     const mediaStream = publishedStream.mediaStream;
-    const tracks = mediaStream.getTracks();
-    if (!tracks.some((track) => track.readyState === TRACK_STATE_ENDED)) {
+    const endedTracks = mediaStream.getTracks().filter((track) => track.readyState === TRACK_STATE_ENDED);
+    if (endedTracks.length === 0) {
       return;
     }
 
-    // Fall back to the kinds we had when the application supplied the stream itself.
-    const constraints: MediaStreamConstraints = publishedStream.constraints ?? {
-      audio: tracks.some((track) => track.kind === TRACK_KIND_AUDIO),
-      video: tracks.some((track) => track.kind === TRACK_KIND_VIDEO),
-    };
+    // Re-acquire only the kinds that actually ended - a healthy track of the other kind
+    // (e.g. video still fine, only the mic dropped) is left attached rather than replaced.
+    // Reuse the application's original per-kind constraints (device id, resolution, etc.)
+    // where available, falling back to a bare boolean.
+    const storedConstraints = publishedStream.constraints;
+    const constraints: MediaStreamConstraints = {};
+    if (endedTracks.some((track) => track.kind === TRACK_KIND_AUDIO)) {
+      constraints.audio = storedConstraints?.audio ?? true;
+    }
+    if (endedTracks.some((track) => track.kind === TRACK_KIND_VIDEO)) {
+      constraints.video = storedConstraints?.video ?? true;
+    }
     logger.info(`Re-acquiring ended tracks for stream ${mediaStream.id}`, constraints);
 
     const replacement = await navigator.mediaDevices.getUserMedia(constraints);
-    for (const track of tracks) {
+    for (const track of endedTracks) {
+      const freshTrack = replacement.getTracks().find((t) => t.kind === track.kind);
+      // Carry over mute state: a fresh getUserMedia track always starts enabled, which would
+      // silently undo a setMicEnabled(false)/setCameraEnabled(false) the application made
+      // before the track ended.
+      if (freshTrack) {
+        freshTrack.enabled = track.enabled;
+      }
       track.stop();
       mediaStream.removeTrack(track);
     }
@@ -738,7 +792,11 @@ export class BandwidthRtc {
 
   private handleError(error: Error): void {
     if (this.errorHandler) {
-      this.errorHandler(error);
+      try {
+        this.errorHandler(error);
+      } catch (err) {
+        logger.error("onError handler threw", err);
+      }
     } else {
       logger.error("Unhandled SDK error (no onError handler registered)", error);
     }
