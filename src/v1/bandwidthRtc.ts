@@ -56,6 +56,11 @@ const DATA_CHANNEL_STATE_OPEN = "open";
 
 const CONNECTION_STATE_FAILED = "failed";
 const CONNECTION_STATE_DISCONNECTED = "disconnected";
+const CONNECTION_STATE_CONNECTED = "connected";
+
+/** How long to wait for the publish peer connection's ICE handshake before giving up. */
+const PUBLISH_ICE_CONNECT_TIMEOUT_MS = 10_000;
+const PUBLISH_ICE_CONNECT_POLL_INTERVAL_MS = 100;
 
 // When true, automatically trigger an ICE restart (via offerPublishSdp(true)) on connection failure.
 // Disabled by default until the retry loop is production-hardened with a proper timeout/backoff.
@@ -656,6 +661,13 @@ export class BandwidthRtc {
     }
 
     try {
+      // The publishing peer connection built by init() moments ago is still negotiating ICE;
+      // the gateway rejects an offer with "peer not ready for sdp offers" until its own side
+      // of that connection reaches connected. publish() gets away without this wait because an
+      // application always calls it well after connect() resolves, but a reconnect's republish
+      // has no such delay - it runs immediately inside init(), so it has to wait explicitly.
+      await this.waitForPublishConnected();
+
       // The senders these were taken from belong to the closed peer connection.
       this.localDtmfSenders.clear();
 
@@ -669,6 +681,24 @@ export class BandwidthRtc {
     } catch (err) {
       logger.error("Failed to republish streams after reconnect", err);
       this.handleError(new BandwidthRtcError(`Failed to republish streams after reconnect: ${err}`));
+    }
+  }
+
+  /** Poll until the publish peer connection reaches "connected", or throw after the timeout. */
+  private async waitForPublishConnected(): Promise<void> {
+    const pc = this.publishingPeerConnection;
+    if (!pc) {
+      throw new BandwidthRtcError("No publishing RTCPeerConnection, cannot republish streams");
+    }
+
+    const startTime = Date.now();
+    while (pc.connectionState !== CONNECTION_STATE_CONNECTED) {
+      if (Date.now() - startTime >= PUBLISH_ICE_CONNECT_TIMEOUT_MS) {
+        throw new BandwidthRtcError(
+          `Publish peer connection did not reach "connected" within ${PUBLISH_ICE_CONNECT_TIMEOUT_MS}ms (state: ${pc.connectionState})`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, PUBLISH_ICE_CONNECT_POLL_INTERVAL_MS));
     }
   }
 

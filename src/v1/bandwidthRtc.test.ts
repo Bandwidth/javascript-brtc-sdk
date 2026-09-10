@@ -273,10 +273,13 @@ describe("bandwidthRtcV1 addStreamToPublishingPeerConnection", () => {
 });
 
 describe("bandwidthRtcV1 init reconnect replay", () => {
-  function stubSetupPeerConnection(brtc: BandwidthRtc) {
-    // init() only needs a stand-in RTCPeerConnection; the real
-    // negotiation performed by setupPeerConnection is exercised elsewhere.
-    (brtc as any).setupPeerConnection = jest.fn().mockResolvedValue({});
+  // init() only needs a stand-in RTCPeerConnection; the real negotiation performed by
+  // setupPeerConnection is exercised elsewhere. Defaults to already connected so the
+  // republish path's ICE wait resolves immediately; pass a mutable object with a different
+  // connectionState to exercise that wait itself.
+  function stubSetupPeerConnection(brtc: BandwidthRtc, pc: any = { connectionState: "connected" }) {
+    (brtc as any).setupPeerConnection = jest.fn().mockResolvedValue(pc);
+    return pc;
   }
 
   function makeTrack(kind: string, readyState: string = "live") {
@@ -334,6 +337,51 @@ describe("bandwidthRtcV1 init reconnect replay", () => {
 
     expect(addSpy).toHaveBeenCalledTimes(3);
     expect(offerSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("waits for the publish peer connection to reach connected before offering", async () => {
+    const brtc = new BandwidthRtc();
+    // The gateway rejects an offer with "peer not ready for sdp offers" until its own side of
+    // the publish peer connection reaches connected - starting the offer immediately after
+    // init() creates the peer connections raced that and failed against a live gateway.
+    const pc = stubSetupPeerConnection(brtc, { connectionState: "connecting" });
+    const addSpy = jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    const offerSpy = jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    (brtc as any).publishedStreams.set("stream-1", { mediaStream: makeLiveStream("stream-1") });
+
+    const initPromise = brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+    // Give the wait loop a couple of polls to prove it is actually waiting, not racing ahead.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(addSpy).not.toHaveBeenCalled();
+    expect(offerSpy).not.toHaveBeenCalled();
+
+    pc.connectionState = "connected";
+    await initPromise;
+
+    expect(addSpy).toHaveBeenCalledTimes(1);
+    expect(offerSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("reports an error rather than offering into a peer connection that never connects", async () => {
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc, { connectionState: "connecting" });
+    const addSpy = jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    const errorHandler = jest.fn();
+    brtc.onError(errorHandler);
+
+    (brtc as any).publishedStreams.set("stream-1", { mediaStream: makeLiveStream("stream-1") });
+    jest.useFakeTimers({ doNotFake: ["nextTick"] });
+
+    const initPromise = brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+    await jest.advanceTimersByTimeAsync(15_000);
+    await initPromise;
+
+    expect(addSpy).not.toHaveBeenCalled();
+    expect(errorHandler).toHaveBeenCalledTimes(1);
+    expect(errorHandler.mock.calls[0][0].message).toMatch(/did not reach "connected"/);
+
+    jest.useRealTimers();
   });
 
   test("replays with the codec preferences the stream was originally published with", async () => {
