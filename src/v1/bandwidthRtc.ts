@@ -48,6 +48,7 @@ const PEER_CONNECTION_TYPE_SUBSCRIBE = "subscribe";
 const TRACK_KIND_AUDIO = "audio";
 const TRACK_KIND_VIDEO = "video";
 const TELEPHONE_EVENT_MIME_TYPE = "audio/telephone-event";
+const TRACK_STATE_ENDED = "ended";
 
 const HEARTBEAT_PING = "PING";
 const HEARTBEAT_PONG = "PONG";
@@ -55,6 +56,12 @@ const DATA_CHANNEL_STATE_OPEN = "open";
 
 const CONNECTION_STATE_FAILED = "failed";
 const CONNECTION_STATE_DISCONNECTED = "disconnected";
+const CONNECTION_STATE_CONNECTED = "connected";
+const CONNECTION_STATE_CLOSED = "closed";
+
+/** How long to wait for the publish peer connection's ICE handshake before giving up. */
+const PUBLISH_ICE_CONNECT_TIMEOUT_MS = 10_000;
+const PUBLISH_ICE_CONNECT_POLL_INTERVAL_MS = 100;
 
 // When true, automatically trigger an ICE restart (via offerPublishSdp(true)) on connection failure.
 // Disabled by default until the retry loop is production-hardened with a proper timeout/backoff.
@@ -80,6 +87,12 @@ export class BandwidthRtc {
   // Prevents concurrent modification to RTCPeerConnection state (can cause race conditions)
   private publishMutex: Mutex = new Mutex();
   private subscribeMutex: Mutex = new Mutex();
+  // init() is signaling-driven ("init" fires on every (re)open), so two closely-spaced
+  // reconnects can otherwise run init() concurrently: the second overwrites
+  // publishingPeerConnection/subscribingPeerConnection out from under the first, which is
+  // still polling the old one in waitForPublishConnected. Serializing init() end-to-end means
+  // there is only ever one publishing/subscribing peer connection in flight at a time.
+  private initMutex: Mutex = new Mutex();
 
   private publishedStreams: Map<string, PublishedStream> = new Map();
   private subscribedStreams: Map<string, StreamMetadata> = new Map();
@@ -93,6 +106,7 @@ export class BandwidthRtc {
   private streamUnavailableHandler?: { (event: RtcStream): void };
   private readyHandler?: { (readyMetadata: ReadyMetadata): void };
   private dtmfSentHandler?: DtmfSentHandler;
+  private errorHandler?: { (error: Error): void };
 
   // Caller identity for pending subscribe tracks, keyed by track id. The gateway
   // negotiates a fresh subscribe track per call and rides the call's metadata on
@@ -131,6 +145,7 @@ export class BandwidthRtc {
     this.signaling.on("ready", this.handleReady.bind(this));
     this.signaling.on("sdpOffer", this.handleSubscribeSdpOffer.bind(this));
     this.signaling.on("init", this.init.bind(this));
+    this.signaling.on("fatalError", this.handleError.bind(this));
 
     await this.signaling.connect(authParams, options);
     logger.info("Successfully connected");
@@ -179,6 +194,18 @@ export class BandwidthRtc {
   }
 
   /**
+   * Set the function that will be called when the SDK hits an error that leaves the
+   * session unusable and cannot be recovered from internally, such as a failure to
+   * republish media after the websocket reconnected, or a reconnect the gateway
+   * refused. Without this the application has no way to tell a healthy session from
+   * one that is connected but can no longer send or receive media.
+   * @param callback callback function
+   */
+  onError(callback: { (error: Error): void }): void {
+    this.errorHandler = callback;
+  }
+
+  /**
    * Publish media to the Bandwidth WebRTC platform
    *
    * This function can publish an existing MediaStream, or it can create and publish a new media stream from MediaStreamConstraints
@@ -196,11 +223,13 @@ export class BandwidthRtc {
   ): Promise<RtcStream> {
     // Cast or create a MediaStream from the input
     let mediaStream: MediaStream;
+    // Only set when we acquired the stream ourselves; retained so ended tracks can be re-acquired.
+    let constraints: MediaStreamConstraints | undefined;
     if (input && this.isMediaStream(input)) {
       // @ts-ignore
       mediaStream = input;
     } else {
-      let constraints: MediaStreamConstraints = { audio: true, video: true };
+      constraints = { audio: true, video: true };
       if (typeof input === "object") {
         constraints = input as MediaStreamConstraints;
       }
@@ -223,6 +252,8 @@ export class BandwidthRtc {
     this.publishedStreams.set(mediaStream.id, {
       mediaStream: mediaStream,
       metadata: publishMetadata,
+      codecPreferences: codecPreferences,
+      constraints: constraints,
     });
 
     if (audioLevelChangeHandler) {
@@ -520,9 +551,16 @@ export class BandwidthRtc {
   }
 
   public async init(setMediaPreferencesResponse: SetMediaPreferencesWebRtcResponse) {
+    return this.initMutex.runExclusive(() => this.doInit(setMediaPreferencesResponse));
+  }
+
+  private async doInit(setMediaPreferencesResponse: SetMediaPreferencesWebRtcResponse) {
     const publishOnTrackHandler = (event: RTCTrackEvent) => {
       logger.debug("publish ontrack event", event);
     };
+    // A reconnect re-runs init() against a fresh offer; the previous peer connection (if any)
+    // is already dead on the far end, but nothing local closes it, so it leaks otherwise.
+    this.publishingPeerConnection?.close();
     this.publishingPeerConnection = await this.setupPeerConnection(
       PEER_CONNECTION_TYPE_PUBLISH,
       publishOnTrackHandler,
@@ -609,11 +647,159 @@ export class BandwidthRtc {
         tags: metadata?.tags,
       });
     };
+    this.subscribingPeerConnection?.close();
     this.subscribingPeerConnection = await this.setupPeerConnection(
       PEER_CONNECTION_TYPE_SUBSCRIBE,
       subscriptionOnTrackHandler,
       setMediaPreferencesResponse.subscribeSdpOffer.sdpOffer,
     );
+
+    await this.republishStreams();
+  }
+
+  /**
+   * Re-attach every previously published stream to the new publishing peer connection.
+   *
+   * On a fresh connect nothing has been published yet and this is a no-op. On a
+   * reconnect (the websocket re-opened and re-emitted "init") the peer connection
+   * built above is trackless: without this the session comes back fully connected
+   * but silent, and the gateway never sees media so the endpoint stays ineligible
+   * for calls.
+   *
+   * init() is driven by a signaling event, so a throw here would only become an
+   * unhandled rejection. Report it to the application instead: the session is up
+   * but cannot publish, and only the application can decide what to do about that.
+   */
+  private async republishStreams(): Promise<void> {
+    if (this.publishedStreams.size === 0) {
+      return;
+    }
+
+    try {
+      // The publishing peer connection built by init() moments ago is still negotiating ICE;
+      // the gateway rejects an offer with "peer not ready for sdp offers" until its own side
+      // of that connection reaches connected. publish() gets away without this wait because an
+      // application always calls it well after connect() resolves, but a reconnect's republish
+      // has no such delay - it runs immediately inside init(), so it has to wait explicitly.
+      await this.waitForPublishConnected();
+
+      // The senders these were taken from belong to the closed peer connection.
+      this.localDtmfSenders.clear();
+
+      // Each stream is reacquired/attached independently: one stream's getUserMedia
+      // rejection (an unplugged device, a revoked permission) must not prevent every
+      // other stream from being attached, nor skip the renegotiation entirely.
+      const reacquireErrors: unknown[] = [];
+      let attachedCount = 0;
+      for (const publishedStream of [...this.publishedStreams.values()]) {
+        try {
+          await this.reacquireEndedTracks(publishedStream);
+          this.addStreamToPublishingPeerConnection(publishedStream.mediaStream, publishedStream.codecPreferences);
+          attachedCount++;
+        } catch (err) {
+          logger.error(`Failed to reacquire ended tracks for stream ${publishedStream.mediaStream.id}`, err);
+          reacquireErrors.push(err);
+        }
+      }
+
+      // One renegotiation covers every re-attached stream. Skip it entirely if nothing
+      // was actually attached - there is nothing to renegotiate.
+      if (attachedCount > 0) {
+        await this.offerPublishSdp();
+      }
+
+      if (reacquireErrors.length > 0) {
+        throw new BandwidthRtcError(`Failed to reacquire tracks for ${reacquireErrors.length} stream(s): ${reacquireErrors.join(", ")}`);
+      }
+    } catch (err) {
+      logger.error("Failed to republish streams after reconnect", err);
+      this.handleError(new BandwidthRtcError(`Failed to republish streams after reconnect: ${err}`));
+    }
+  }
+
+  /**
+   * Poll until the publish peer connection reaches "connected", or throw after the timeout.
+   * "failed"/"closed" are unrecoverable - bail immediately instead of waiting out the full
+   * timeout for a peer connection that will never reach "connected".
+   */
+  private async waitForPublishConnected(): Promise<void> {
+    const pc = this.publishingPeerConnection;
+    if (!pc) {
+      throw new BandwidthRtcError("No publishing RTCPeerConnection, cannot republish streams");
+    }
+
+    const startTime = Date.now();
+    while (pc.connectionState !== CONNECTION_STATE_CONNECTED) {
+      if (pc.connectionState === CONNECTION_STATE_FAILED || pc.connectionState === CONNECTION_STATE_CLOSED) {
+        throw new BandwidthRtcError(`Publish peer connection reached unrecoverable state "${pc.connectionState}"`);
+      }
+      if (Date.now() - startTime >= PUBLISH_ICE_CONNECT_TIMEOUT_MS) {
+        throw new BandwidthRtcError(
+          `Publish peer connection did not reach "connected" within ${PUBLISH_ICE_CONNECT_TIMEOUT_MS}ms (state: ${pc.connectionState})`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, PUBLISH_ICE_CONNECT_POLL_INTERVAL_MS));
+    }
+  }
+
+  /**
+   * Replace any track of a published stream that ended while the websocket was down
+   * (device unplugged, OS revoked the mic, the browser released it).
+   *
+   * An ended track can still be attached to a peer connection and will produce a
+   * perfectly valid-looking SDP offer, but its sender never emits RTP - so the far
+   * end never sees media, which is indistinguishable from never having republished
+   * at all. Re-acquire instead, and swap the fresh tracks into the same MediaStream
+   * so the object the application already holds stays valid.
+   */
+  private async reacquireEndedTracks(publishedStream: PublishedStream): Promise<void> {
+    const mediaStream = publishedStream.mediaStream;
+    const endedTracks = mediaStream.getTracks().filter((track) => track.readyState === TRACK_STATE_ENDED);
+    if (endedTracks.length === 0) {
+      return;
+    }
+
+    // Re-acquire only the kinds that actually ended - a healthy track of the other kind
+    // (e.g. video still fine, only the mic dropped) is left attached rather than replaced.
+    // Reuse the application's original per-kind constraints (device id, resolution, etc.)
+    // where available, falling back to a bare boolean.
+    const storedConstraints = publishedStream.constraints;
+    const constraints: MediaStreamConstraints = {};
+    if (endedTracks.some((track) => track.kind === TRACK_KIND_AUDIO)) {
+      constraints.audio = storedConstraints?.audio ?? true;
+    }
+    if (endedTracks.some((track) => track.kind === TRACK_KIND_VIDEO)) {
+      constraints.video = storedConstraints?.video ?? true;
+    }
+    logger.info(`Re-acquiring ended tracks for stream ${mediaStream.id}`, constraints);
+
+    const replacement = await navigator.mediaDevices.getUserMedia(constraints);
+    for (const track of endedTracks) {
+      const freshTrack = replacement.getTracks().find((t) => t.kind === track.kind);
+      // Carry over mute state: a fresh getUserMedia track always starts enabled, which would
+      // silently undo a setMicEnabled(false)/setCameraEnabled(false) the application made
+      // before the track ended.
+      if (freshTrack) {
+        freshTrack.enabled = track.enabled;
+      }
+      track.stop();
+      mediaStream.removeTrack(track);
+    }
+    for (const track of replacement.getTracks()) {
+      mediaStream.addTrack(track);
+    }
+  }
+
+  private handleError(error: Error): void {
+    if (this.errorHandler) {
+      try {
+        this.errorHandler(error);
+      } catch (err) {
+        logger.error("onError handler threw", err);
+      }
+    } else {
+      logger.error("Unhandled SDK error (no onError handler registered)", error);
+    }
   }
 
   private async setupPeerConnection(
