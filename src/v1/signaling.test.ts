@@ -188,7 +188,7 @@ describe("Signaling websocket event handlers", () => {
     expect(ws.setAutoReconnect).not.toHaveBeenCalled();
   });
 
-  test("should clear ping interval and set isReady false on close", async () => {
+  test("should clear ping interval on close", async () => {
     // Trigger open first to set up pingInterval
     const openCallback = getWsCallback("open");
     await openCallback();
@@ -196,7 +196,7 @@ describe("Signaling websocket event handlers", () => {
     const closeCallback = getWsCallback("close");
     expect(closeCallback).toBeDefined();
 
-    closeCallback(4000);
+    closeCallback(1001);
 
     expect((signaling as any).isReady).toBe(false);
   });
@@ -208,6 +208,29 @@ describe("Signaling websocket event handlers", () => {
     closeCallback(1000);
 
     // After _disconnect(false), ws should be null
+    expect((signaling as any).ws).toBeNull();
+    expect((signaling as any).isReady).toBe(false);
+  });
+
+  test("should not disconnect on the retryable close code 1001", async () => {
+    const closeCallback = getWsCallback("close");
+    expect(closeCallback).toBeDefined();
+
+    closeCallback(1001);
+
+    expect((signaling as any).ws).not.toBeNull();
+    const ws = (signaling as any).ws;
+    expect(ws.setAutoReconnect).not.toHaveBeenCalled();
+  });
+
+  test.each([4409, 1011, 4000])("should disable auto-reconnect and disconnect on close code %d", async (code) => {
+    const ws = (signaling as any).ws;
+    const closeCallback = getWsCallback("close");
+    expect(closeCallback).toBeDefined();
+
+    closeCallback(code);
+
+    expect(ws.setAutoReconnect).toHaveBeenCalledWith(false);
     expect((signaling as any).ws).toBeNull();
     expect((signaling as any).isReady).toBe(false);
   });

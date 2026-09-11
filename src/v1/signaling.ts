@@ -32,6 +32,13 @@ const FATAL_HANDSHAKE_ERRORS: Record<string, { status: number; logMessage: strin
   },
 };
 
+/**
+ * Close codes that should trigger a reconnect on this same client instance.
+ * Every other code, including ones this SDK doesn't recognize, tears the
+ * connection down instead of retrying it.
+ */
+const RETRY_CLOSE_CODES = new Set([1001]);
+
 class Signaling extends EventEmitter {
   private defaultWebsocketUrl: string = "wss://gateway.pv.prod.global.aws.bandwidth.com/prod/gateway-service/api/v1/endpoints";
   private ws: JsonRpcClient | null = null;
@@ -149,8 +156,12 @@ class Signaling extends EventEmitter {
         if (this.pingInterval) {
           clearInterval(this.pingInterval);
         }
-        if (code == 1000) {
-          // We were asked to go away and not come back. We should disconnect without calling leave.
+        if (!RETRY_CLOSE_CODES.has(code)) {
+          // rpc-websockets schedules its own reconnect synchronously, before it
+          // fires the "close" event we're handling here, so setAutoReconnect(false)
+          // alone is too late — the pending timer has to be cleared directly.
+          clearTimeout((ws as any).reconnect_timer_id);
+          ws.setAutoReconnect(false);
           this._disconnect(false);
         }
         this.isReady = false;
