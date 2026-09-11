@@ -59,6 +59,10 @@ class Signaling extends EventEmitter {
 
   connect(authParams: RtcAuthParams, options?: RtcOptions) {
     let rpc_id = 1;
+    // rpc-websockets auto-reconnects with a brand new underlying WebSocket (same
+    // JsonRpcClient instance), so "open" fires again on every reconnect. Scoped to
+    // this connect() call so a fresh top-level connect() always starts as false.
+    let hasConnectedOnce = false;
 
     return new Promise<void>((resolve, reject) => {
       if (this.ws) {
@@ -102,16 +106,18 @@ class Signaling extends EventEmitter {
 
       ws.on("open", async () => {
         logger.debug("Websocket open");
-        if (globalThis.addEventListener) {
+        const isReconnect = hasConnectedOnce;
+        hasConnectedOnce = true;
+        if (!isReconnect && globalThis.addEventListener) {
           globalThis.addEventListener("beforeunload", (event) => {
             this.disconnect();
           });
         }
-        // TODO: handle reconnections
         let preferencesResponse = await this.setMediaPreferences();
         // logger.debug(`Media preferences set`, preferencesResponse);
-        // Setup Peers
-        this.emit("init", preferencesResponse);
+        // Setup Peers. isReconnect tells the caller whether existing peer connections/media
+        // need to be rebuilt and re-published, rather than created for the first time.
+        this.emit("init", preferencesResponse, isReconnect);
 
         this.pingInterval = setInterval(() => {
           ws.call("ping", {});

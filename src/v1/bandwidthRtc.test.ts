@@ -303,3 +303,155 @@ describe("bandwidthRtcV1 connect method", () => {
     expect(signaling.on).toHaveBeenCalledWith("init", expect.any(Function));
   });
 });
+
+describe("bandwidthRtcV1 retryIceOnFailed", () => {
+  beforeAll(() => {
+    setupNavigatorMocks();
+    setupMocks();
+  });
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  function makePc(connectionState: string) {
+    return { connectionState } as any as RTCPeerConnection;
+  }
+
+  test("does nothing when shouldRetry is false", async () => {
+    const brtc = new BandwidthRtc();
+    const offerPublishSdp = jest.spyOn(brtc as any, "offerPublishSdp");
+
+    await (brtc as any).retryIceOnFailed(makePc("failed"), "publish", false);
+
+    expect(offerPublishSdp).not.toHaveBeenCalled();
+  });
+
+  test("does not restart the publish connection when the subscribe connection failed", async () => {
+    const brtc = new BandwidthRtc();
+    const offerPublishSdp = jest.spyOn(brtc as any, "offerPublishSdp");
+
+    await (brtc as any).retryIceOnFailed(makePc("failed"), "subscribe", true);
+
+    expect(offerPublishSdp).not.toHaveBeenCalled();
+  });
+
+  test("re-offers once and stops once the publish connection recovers", async () => {
+    const brtc = new BandwidthRtc();
+    const pc = makePc("failed");
+    jest.spyOn(brtc as any, "offerPublishSdp").mockImplementation(async () => {
+      (pc as any).connectionState = "connected";
+      return {} as any;
+    });
+
+    await (brtc as any).retryIceOnFailed(pc, "publish", true);
+
+    expect((brtc as any).offerPublishSdp).toHaveBeenCalledTimes(1);
+  });
+
+  test("retries every 5s until the timeout elapses if still failed", async () => {
+    const brtc = new BandwidthRtc();
+    const pc = makePc("failed");
+    jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue({} as any);
+
+    const done = (brtc as any).retryIceOnFailed(pc, "publish", true);
+    // Initial offer, then retries at 5s/10s/... up to the 30s timeout.
+    for (let i = 0; i < 6; i++) {
+      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(5_000);
+    }
+    await done;
+
+    expect((brtc as any).offerPublishSdp).toHaveBeenCalledTimes(7);
+  });
+
+  test("does not throw when a retry's offerPublishSdp rejects", async () => {
+    const brtc = new BandwidthRtc();
+    const pc = makePc("failed");
+    jest.spyOn(brtc as any, "offerPublishSdp").mockRejectedValue(new Error("signaling down"));
+
+    const done = (brtc as any).retryIceOnFailed(pc, "publish", true);
+    for (let i = 0; i < 6; i++) {
+      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(5_000);
+    }
+
+    await expect(done).resolves.not.toThrow();
+  });
+});
+
+describe("bandwidthRtcV1 init on signaling reconnect", () => {
+  beforeAll(() => {
+    setupNavigatorMocks();
+    setupMocks();
+  });
+
+  function makeMockStream(id: string) {
+    return { id, getTracks: () => [] };
+  }
+
+  function makePreferencesResponse() {
+    return {
+      publishSdpOffer: { sdpOffer: "publish-offer" },
+      subscribeSdpOffer: { sdpOffer: "subscribe-offer" },
+    } as any;
+  }
+
+  test("first init does not close old peer connections or re-publish", async () => {
+    const brtc = new BandwidthRtc();
+    const setupPeerConnection = jest.spyOn(brtc as any, "setupPeerConnection").mockResolvedValue({ close: jest.fn() });
+    const addStream = jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection");
+    const offerPublishSdp = jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue({});
+    (brtc as any).publishedStreams.set("stream-1", { mediaStream: makeMockStream("stream-1") });
+
+    await brtc.init(makePreferencesResponse());
+
+    expect(setupPeerConnection).toHaveBeenCalledTimes(2);
+    expect(addStream).not.toHaveBeenCalled();
+    expect(offerPublishSdp).not.toHaveBeenCalled();
+  });
+
+  test("reconnect closes stale peer connections and re-publishes existing streams", async () => {
+    const brtc = new BandwidthRtc();
+    const oldPublishPc = { close: jest.fn() };
+    const oldSubscribePc = { close: jest.fn() };
+    (brtc as any).publishingPeerConnection = oldPublishPc;
+    (brtc as any).subscribingPeerConnection = oldSubscribePc;
+    (brtc as any).subscribingPeerConnectionSdpRevision = 5;
+    (brtc as any).subscribeTrackMetadata.set("track-1", { from: "someone" });
+    (brtc as any).localDtmfSenders.set("stream-1", { insertDTMF: jest.fn() });
+
+    const stream = makeMockStream("stream-1");
+    (brtc as any).publishedStreams.set("stream-1", { mediaStream: stream });
+
+    jest.spyOn(brtc as any, "setupPeerConnection").mockResolvedValue({ close: jest.fn() });
+    const addStream = jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    const offerPublishSdp = jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue({});
+
+    await brtc.init(makePreferencesResponse(), true);
+
+    expect(oldPublishPc.close).toHaveBeenCalledTimes(1);
+    expect(oldSubscribePc.close).toHaveBeenCalledTimes(1);
+    expect(addStream).toHaveBeenCalledWith(stream);
+    expect(offerPublishSdp).toHaveBeenCalledTimes(1);
+    expect((brtc as any).subscribingPeerConnectionSdpRevision).toBe(0);
+    expect((brtc as any).subscribeTrackMetadata.size).toBe(0);
+    expect((brtc as any).localDtmfSenders.size).toBe(0);
+  });
+
+  test("reconnect with no published streams does not re-offer", async () => {
+    const brtc = new BandwidthRtc();
+    (brtc as any).publishingPeerConnection = { close: jest.fn() };
+    (brtc as any).subscribingPeerConnection = { close: jest.fn() };
+    jest.spyOn(brtc as any, "setupPeerConnection").mockResolvedValue({ close: jest.fn() });
+    const offerPublishSdp = jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue({});
+
+    await brtc.init(makePreferencesResponse(), true);
+
+    expect(offerPublishSdp).not.toHaveBeenCalled();
+  });
+});
