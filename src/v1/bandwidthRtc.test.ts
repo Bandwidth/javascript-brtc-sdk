@@ -604,10 +604,7 @@ describe("bandwidthRtcV1 init reconnect replay", () => {
     jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
     jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
 
-    await Promise.all([
-      brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any),
-      brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any),
-    ]);
+    await Promise.all([brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any), brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any)]);
 
     // setupPeerConnection is called twice per init() call (publish, then subscribe).
     // If the two init() calls ran concurrently, a later call's "start" could land
