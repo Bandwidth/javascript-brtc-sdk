@@ -64,8 +64,7 @@ const PUBLISH_ICE_CONNECT_TIMEOUT_MS = 10_000;
 const PUBLISH_ICE_CONNECT_POLL_INTERVAL_MS = 100;
 
 // When true, automatically trigger an ICE restart (via offerPublishSdp(true)) on connection failure.
-// Disabled by default until the retry loop is production-hardened with a proper timeout/backoff.
-const RETRY_ICE_ON_FAILED = false;
+const RETRY_ICE_ON_FAILED = true;
 
 export class BandwidthRtc {
   private options?: RtcOptions;
@@ -427,8 +426,16 @@ export class BandwidthRtc {
   }
 
   // Re-publishes the SDP with iceRestart=true to trigger ICE renegotiation after a connection failure.
-  private async retryIceOnFailed(pc: RTCPeerConnection, shouldRetry: boolean): Promise<void> {
+  private async retryIceOnFailed(pc: RTCPeerConnection, peerConnectionType: string, shouldRetry: boolean): Promise<void> {
     if (!shouldRetry) {
+      return;
+    }
+    if (peerConnectionType !== PEER_CONNECTION_TYPE_PUBLISH) {
+      // The subscribing peer connection never creates its own SDP offer - the gateway always
+      // initiates that renegotiation - so there's no client-side offer to re-send with
+      // iceRestart=true here. offerPublishSdp() only ever acts on publishingPeerConnection,
+      // so calling it here would incorrectly restart the *other* (unfailed) connection.
+      logger.warn(`ICE restart on the ${peerConnectionType} peer connection requires the gateway to re-offer; client cannot initiate`);
       return;
     }
 
@@ -436,7 +443,15 @@ export class BandwidthRtc {
     const ICE_RESTART_RETRY_INTERVAL_MS = 5_000;
     const startTime = Date.now();
 
-    await this.offerPublishSdp(true);
+    const retryOffer = async () => {
+      try {
+        await this.offerPublishSdp(true);
+      } catch (err) {
+        logger.warn("ICE restart offer failed", err);
+      }
+    };
+
+    await retryOffer();
     let connectionState = pc.connectionState;
     while (connectionState === CONNECTION_STATE_FAILED) {
       if (Date.now() - startTime >= ICE_RESTART_TIMEOUT_MS) {
@@ -445,7 +460,7 @@ export class BandwidthRtc {
       }
       await new Promise((resolve) => setTimeout(resolve, ICE_RESTART_RETRY_INTERVAL_MS));
       // Don't block on this, we should try multiple times
-      this.offerPublishSdp(true);
+      retryOffer();
       connectionState = pc.connectionState;
     }
   }
@@ -550,11 +565,23 @@ export class BandwidthRtc {
     }
   }
 
-  public async init(setMediaPreferencesResponse: SetMediaPreferencesWebRtcResponse) {
-    return this.initMutex.runExclusive(() => this.doInit(setMediaPreferencesResponse));
+  public async init(setMediaPreferencesResponse: SetMediaPreferencesWebRtcResponse, isReconnect: boolean = false) {
+    return this.initMutex.runExclusive(() => this.doInit(setMediaPreferencesResponse, isReconnect));
   }
 
-  private async doInit(setMediaPreferencesResponse: SetMediaPreferencesWebRtcResponse) {
+  private async doInit(setMediaPreferencesResponse: SetMediaPreferencesWebRtcResponse, isReconnect: boolean = false) {
+    if (isReconnect) {
+      // The signaling websocket reconnected (e.g. a gateway-initiated 1001 that expects the
+      // same endpoint to keep going, not a fresh connect()). The subscribing side's SDP
+      // revision counter and pending track metadata are scoped to the peer connection torn
+      // down below, so they must reset alongside it. republishStreams() (at the end of this
+      // method) rebuilds the publish side, including re-adding every currently published
+      // stream so the far end keeps receiving media instead of silence.
+      logger.info("Signaling reconnected; rebuilding peer connections and re-publishing existing streams");
+      this.subscribingPeerConnectionSdpRevision = 0;
+      this.subscribeTrackMetadata.clear();
+    }
+
     const publishOnTrackHandler = (event: RTCTrackEvent) => {
       logger.debug("publish ontrack event", event);
     };
@@ -654,17 +681,18 @@ export class BandwidthRtc {
       setMediaPreferencesResponse.subscribeSdpOffer.sdpOffer,
     );
 
-    await this.republishStreams();
+    if (isReconnect) {
+      await this.republishStreams();
+    }
   }
 
   /**
    * Re-attach every previously published stream to the new publishing peer connection.
    *
-   * On a fresh connect nothing has been published yet and this is a no-op. On a
-   * reconnect (the websocket re-opened and re-emitted "init") the peer connection
-   * built above is trackless: without this the session comes back fully connected
-   * but silent, and the gateway never sees media so the endpoint stays ineligible
-   * for calls.
+   * Only called from doInit's isReconnect branch: the websocket re-opened and
+   * re-emitted "init", and the peer connection built above is trackless - without
+   * this the session comes back fully connected but silent, and the gateway never
+   * sees media so the endpoint stays ineligible for calls.
    *
    * init() is driven by a signaling event, so a throw here would only become an
    * unhandled rejection. Report it to the application instead: the session is up
@@ -815,14 +843,14 @@ export class BandwidthRtc {
         const pc = event.target as RTCPeerConnection;
         const connectionState = pc.connectionState;
         logger.debug("onconnectionstatechange", connectionState, pc);
-        if (connectionState === CONNECTION_STATE_FAILED) {
+        if (connectionState === CONNECTION_STATE_DISCONNECTED) {
+          logger.warn("Peer disconnected, connection may be reestablished");
+        } else if (connectionState === CONNECTION_STATE_FAILED) {
           logger.warn("Connection failed, ICE restart required");
-          await this.retryIceOnFailed(pc, RETRY_ICE_ON_FAILED);
+          await this.retryIceOnFailed(pc, peerConnectionType, RETRY_ICE_ON_FAILED);
         }
       } catch (err) {
-        if (globalThis.window) {
-          logger.warn("onconnectionstatechange error", err);
-        }
+        logger.warn("onconnectionstatechange error", err);
       }
     };
     logger.debug("Initial SDP offer", initialSdpOffer);
@@ -863,29 +891,12 @@ export class BandwidthRtc {
       }
     };
 
-    peerConnection.onconnectionstatechange = (event) => {
-      try {
-        const pc = event.target as RTCPeerConnection;
-        logger.debug("onconnectionstatechange", pc.connectionState, pc);
-        const connectionState = pc.connectionState;
-        if (connectionState === CONNECTION_STATE_DISCONNECTED) {
-          logger.warn("Peer disconnected, connection may be reestablished");
-        }
-      } catch (err) {
-        if (globalThis.window) {
-          logger.warn("onconnectionstatechange error", err);
-        }
-      }
-    };
-
     peerConnection.oniceconnectionstatechange = (event) => {
       try {
         const pc = event.target as RTCPeerConnection;
         logger.debug("oniceconnectionstatechange", pc.iceConnectionState, pc);
       } catch (err) {
-        if (globalThis.window) {
-          logger.warn("oniceconnectionstatechange error", err);
-        }
+        logger.warn("oniceconnectionstatechange error", err);
       }
     };
 
@@ -894,9 +905,7 @@ export class BandwidthRtc {
         const pc = event.target as RTCPeerConnection;
         logger.debug("onicegatheringstatechange", pc.iceGatheringState, pc);
       } catch (err) {
-        if (globalThis.window) {
-          logger.warn("onicegatheringstatechange error", err);
-        }
+        logger.warn("onicegatheringstatechange error", err);
       }
     };
 
@@ -904,9 +913,7 @@ export class BandwidthRtc {
       try {
         logger.debug("onnegotiationneeded", event.target);
       } catch (err) {
-        if (globalThis.window) {
-          logger.warn("onnegotiationneeded error", err);
-        }
+        logger.warn("onnegotiationneeded error", err);
       }
     };
 
@@ -915,9 +922,7 @@ export class BandwidthRtc {
         const pc = event.target as RTCPeerConnection;
         logger.debug("onsignalingstatechange", pc.signalingState, pc);
       } catch (err) {
-        if (globalThis.window) {
-          logger.warn("onsignalingstatechange error", err);
-        }
+        logger.warn("onsignalingstatechange error", err);
       }
     };
 
