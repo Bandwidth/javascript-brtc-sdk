@@ -316,19 +316,21 @@ export class BandwidthRtc {
       return;
     }
 
+    // Stop local media first so unpublish takes effect even if renegotiation fails. The
+    // mutex keeps transceiver removal out of an in-flight negotiation.
     await this.publishMutex.runExclusive(async () => {
-      // Stop the local tracks first regardless of what happens next - the user's intent
-      // (stop sending this media) must take effect immediately.
       this.cleanupPublishedStreams(...publishedStreams);
-      try {
-        // The gateway rejects offers unless the publish peer is "connected"; wait it out
-        // rather than sending an offer doomed to be rejected during a brief ICE blip.
-        await this.waitForPublishConnected();
-        await this.negotiatePublishSdp();
-      } catch (err) {
-        throw new BandwidthRtcError(`Stream(s) were unpublished locally, but renegotiation with the gateway failed: ${err}`);
-      }
     });
+
+    try {
+      // The gateway rejects offers until the publish peer is connected. Wait outside the
+      // mutex so a gateway-initiated ICE restart is not blocked; a renegotiation in between
+      // already carries the removed transceivers, which makes ours a no-op.
+      await this.waitForPublishConnected();
+      await this.offerPublishSdp();
+    } catch (err) {
+      throw new BandwidthRtcError(`Stream(s) were unpublished locally, but renegotiation with the gateway failed: ${err}`);
+    }
   }
 
   /**

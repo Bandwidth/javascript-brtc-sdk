@@ -397,6 +397,34 @@ describe("bandwidthRtcV1 unpublish", () => {
 
     expect(pc.removeTrack).toHaveBeenCalledWith(transceiver.sender);
   });
+
+  test("does not hold publishMutex while waiting for the publish peer to reach connected", async () => {
+    const brtc = new BandwidthRtc();
+    const track = makeTrack("stream-1-track");
+    const stream = makeStream("stream-1", [track]);
+    const transceiver = makeTransceiverFor(track);
+    const pc = makePublishingPeerConnection([transceiver], "connecting");
+    (brtc as any).publishingPeerConnection = pc;
+    (brtc as any).publishedStreams.set("stream-1", { mediaStream: stream });
+    const offerSdp = stubOfferSdp(brtc);
+
+    const unpublishPromise = brtc.unpublish("stream-1");
+
+    // Give the wait loop a couple of polls to prove unpublish is actually waiting, not racing ahead.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(offerSdp).not.toHaveBeenCalled();
+
+    // A concurrent publish-side task must be able to acquire and release publishMutex while
+    // unpublish is still waiting for "connected" - proving the wait doesn't hold the mutex.
+    const otherTask = jest.fn().mockResolvedValue(undefined);
+    await (brtc as any).publishMutex.runExclusive(otherTask);
+    expect(otherTask).toHaveBeenCalledTimes(1);
+
+    pc.connectionState = "connected";
+    await unpublishPromise;
+
+    expect(offerSdp).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("bandwidthRtcV1 init reconnect replay", () => {
