@@ -21,6 +21,10 @@ export default class AudioLevelDetector extends EventEmitter {
   private analyserNode: AnalyserNode;
   private currentAudioLevel: AudioLevel = AudioLevel.SILENT;
   private previousAudioLevel: AudioLevel | undefined;
+  private audioContext: AudioContext;
+  private sourceNode: MediaStreamAudioSourceNode;
+  private intervalHandle: ReturnType<typeof setInterval>;
+  private stopped = false;
 
   constructor(config: AudioLevelDetectorOptions) {
     super();
@@ -55,8 +59,27 @@ export default class AudioLevelDetector extends EventEmitter {
     analyser.smoothingTimeConstant = 0.85;
     source.connect(analyser);
     this.analyserNode = analyser;
+    this.audioContext = context;
+    this.sourceNode = source;
 
-    setInterval(this.analyse.bind(this), this.sampleInterval);
+    this.intervalHandle = setInterval(this.analyse.bind(this), this.sampleInterval);
+  }
+
+  /**
+   * Releases the AudioContext, source node, and sampling interval. Idempotent
+   * so callers don't need to track whether they already stopped this detector.
+   */
+  stop(): void {
+    if (this.stopped) {
+      return;
+    }
+    this.stopped = true;
+    clearInterval(this.intervalHandle);
+    this.sourceNode.disconnect();
+    // close() can reject if the context is already closed; that's fine, we're
+    // tearing down either way.
+    this.audioContext.close().catch(() => {});
+    this.removeAllListeners();
   }
 
   analyse() {

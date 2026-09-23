@@ -1,4 +1,5 @@
 import { MediaType } from "../types";
+import type AudioLevelDetector from "../audioLevelDetector";
 
 export interface SetMediaPreferencesWebRtcResponse {
   endpointId: string;
@@ -78,6 +79,8 @@ export interface PublishedStream {
    * same devices. Undefined when the application supplied its own MediaStream.
    */
   constraints?: MediaStreamConstraints;
+  /** The audio level detector attached to this stream, if any, so it can be stopped on unpublish. */
+  audioLevelDetector?: AudioLevelDetector;
 }
 
 export interface PublishMetadata {

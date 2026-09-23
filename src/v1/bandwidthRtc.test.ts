@@ -1,5 +1,6 @@
 import { BandwidthRtc } from "./bandwidthRtc";
 import { setupMocks, setupNavigatorMocks } from "../mocks";
+import { BandwidthRtcError } from "../types";
 
 // Mock Signaling class
 jest.mock("./signaling", () => {
@@ -272,6 +273,160 @@ describe("bandwidthRtcV1 addStreamToPublishingPeerConnection", () => {
   });
 });
 
+describe("bandwidthRtcV1 unpublish", () => {
+  function makeTrack(id: string) {
+    return { id, stop: jest.fn() };
+  }
+
+  function makeStream(id: string, tracks: any[]) {
+    return { id, getTracks: () => tracks } as any;
+  }
+
+  function makeTransceiverFor(track: any) {
+    return { sender: { track }, stop: jest.fn() };
+  }
+
+  function makePublishingPeerConnection(transceivers: any[], connectionState: string = "connected") {
+    return {
+      getTransceivers: jest.fn().mockReturnValue(transceivers),
+      removeTrack: jest.fn(),
+      createOffer: jest.fn().mockResolvedValue({ sdp: "v=0" }),
+      setLocalDescription: jest.fn().mockResolvedValue(undefined),
+      setRemoteDescription: jest.fn().mockResolvedValue(undefined),
+      connectionState,
+    };
+  }
+
+  function stubOfferSdp(brtc: BandwidthRtc, impl?: () => Promise<any>) {
+    const offerSdp = jest.fn(impl ?? (() => Promise.resolve({ sdpAnswer: "sdp", peerType: "publish" })));
+    (brtc as any).signaling.offerSdp = offerSdp;
+    return offerSdp;
+  }
+
+  test("unpublish with an unknown id leaves other published streams in place and does not renegotiate", async () => {
+    const brtc = new BandwidthRtc();
+    const track = makeTrack("stream-1-track");
+    const stream = makeStream("stream-1", [track]);
+    const transceiver = makeTransceiverFor(track);
+    const pc = makePublishingPeerConnection([transceiver]);
+    (brtc as any).publishingPeerConnection = pc;
+    (brtc as any).publishedStreams.set("stream-1", { mediaStream: stream });
+    const offerSdp = stubOfferSdp(brtc);
+
+    await brtc.unpublish("unknown-id");
+
+    expect((brtc as any).publishedStreams.has("stream-1")).toBe(true);
+    expect(pc.removeTrack).not.toHaveBeenCalled();
+    expect(track.stop).not.toHaveBeenCalled();
+    expect(offerSdp).not.toHaveBeenCalled();
+  });
+
+  test("unpublish(stream) stops that stream's audio level detector", async () => {
+    const brtc = new BandwidthRtc();
+    const track = makeTrack("stream-1-track");
+    const stream = makeStream("stream-1", [track]);
+    const transceiver = makeTransceiverFor(track);
+    const pc = makePublishingPeerConnection([transceiver]);
+    (brtc as any).publishingPeerConnection = pc;
+    const audioLevelDetector = { stop: jest.fn() };
+    (brtc as any).publishedStreams.set("stream-1", { mediaStream: stream, audioLevelDetector });
+    stubOfferSdp(brtc);
+
+    await brtc.unpublish({ mediaStream: stream } as any);
+
+    expect(audioLevelDetector.stop).toHaveBeenCalledTimes(1);
+  });
+
+  test("unpublish after disconnect does not throw, stops the tracks, and does not call offerSdp", async () => {
+    const brtc = new BandwidthRtc();
+    const track = makeTrack("stream-1-track");
+    const stream = makeStream("stream-1", [track]);
+    (brtc as any).publishingPeerConnection = undefined;
+    (brtc as any).publishedStreams.set("stream-1", { mediaStream: stream });
+    const offerSdp = stubOfferSdp(brtc);
+
+    await expect(brtc.unpublish("stream-1")).resolves.toBeUndefined();
+
+    expect(track.stop).toHaveBeenCalledTimes(1);
+    expect((brtc as any).publishedStreams.has("stream-1")).toBe(false);
+    expect(offerSdp).not.toHaveBeenCalled();
+  });
+
+  test("rejects with BandwidthRtcError when renegotiation fails, but still cleans up locally", async () => {
+    const brtc = new BandwidthRtc();
+    const track = makeTrack("stream-1-track");
+    const stream = makeStream("stream-1", [track]);
+    const transceiver = makeTransceiverFor(track);
+    const pc = makePublishingPeerConnection([transceiver]);
+    (brtc as any).publishingPeerConnection = pc;
+    (brtc as any).publishedStreams.set("stream-1", { mediaStream: stream });
+    stubOfferSdp(brtc, () => Promise.reject(new Error("gateway rejected offer")));
+
+    await expect(brtc.unpublish("stream-1")).rejects.toThrow(BandwidthRtcError);
+
+    expect(track.stop).toHaveBeenCalledTimes(1);
+    expect(pc.removeTrack).toHaveBeenCalledWith(transceiver.sender);
+    expect((brtc as any).publishedStreams.has("stream-1")).toBe(false);
+  });
+
+  test("does not remove transceivers until an in-flight publish negotiation completes", async () => {
+    const brtc = new BandwidthRtc();
+    const track = makeTrack("stream-1-track");
+    const stream = makeStream("stream-1", [track]);
+    const transceiver = makeTransceiverFor(track);
+    const pc = makePublishingPeerConnection([transceiver]);
+    (brtc as any).publishingPeerConnection = pc;
+    (brtc as any).publishedStreams.set("stream-1", { mediaStream: stream });
+
+    let resolveOfferSdp!: (value: any) => void;
+    const deferredOfferSdp = new Promise((resolve) => {
+      resolveOfferSdp = resolve;
+    });
+    (brtc as any).signaling.offerSdp = jest.fn().mockReturnValueOnce(deferredOfferSdp).mockResolvedValue({ sdpAnswer: "sdp", peerType: "publish" });
+
+    // Simulate an in-flight publish negotiation holding publishMutex, blocked on the gateway's answer.
+    const inFlightPublish = (brtc as any).publishMutex.runExclusive(() => (brtc as any).negotiatePublishSdp());
+
+    const unpublishPromise = brtc.unpublish("stream-1");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(pc.removeTrack).not.toHaveBeenCalled();
+
+    resolveOfferSdp({ sdpAnswer: "sdp", peerType: "publish" });
+    await inFlightPublish;
+    await unpublishPromise;
+
+    expect(pc.removeTrack).toHaveBeenCalledWith(transceiver.sender);
+  });
+
+  test("does not hold publishMutex while waiting for the publish peer to reach connected", async () => {
+    const brtc = new BandwidthRtc();
+    const track = makeTrack("stream-1-track");
+    const stream = makeStream("stream-1", [track]);
+    const transceiver = makeTransceiverFor(track);
+    const pc = makePublishingPeerConnection([transceiver], "connecting");
+    (brtc as any).publishingPeerConnection = pc;
+    (brtc as any).publishedStreams.set("stream-1", { mediaStream: stream });
+    const offerSdp = stubOfferSdp(brtc);
+
+    const unpublishPromise = brtc.unpublish("stream-1");
+
+    // Give the wait loop a couple of polls to prove unpublish is actually waiting, not racing ahead.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(offerSdp).not.toHaveBeenCalled();
+
+    // A concurrent publish-side task must be able to acquire and release publishMutex while
+    // unpublish is still waiting for "connected" - proving the wait doesn't hold the mutex.
+    const otherTask = jest.fn().mockResolvedValue(undefined);
+    await (brtc as any).publishMutex.runExclusive(otherTask);
+    expect(otherTask).toHaveBeenCalledTimes(1);
+
+    pc.connectionState = "connected";
+    await unpublishPromise;
+
+    expect(offerSdp).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("bandwidthRtcV1 init reconnect replay", () => {
   // init() only needs a stand-in RTCPeerConnection; the real negotiation performed by
   // setupPeerConnection is exercised elsewhere. Defaults to already connected so the
@@ -405,7 +560,10 @@ describe("bandwidthRtcV1 init reconnect replay", () => {
     const brtc = new BandwidthRtc();
     (brtc as any).publishingPeerConnection = {};
     jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
-    jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+    // publish() now negotiates via negotiatePublishSdp directly (under its own publishMutex
+    // section), not the mutex-acquiring offerPublishSdp wrapper - see the unpublish/publish
+    // race fix in bandwidthRtc.ts.
+    jest.spyOn(brtc as any, "negotiatePublishSdp").mockResolvedValue(undefined);
 
     const mediaStream = makeLiveStream("stream-1");
     mockGetUserMedia.mockResolvedValue(mediaStream);
@@ -546,6 +704,41 @@ describe("bandwidthRtcV1 init reconnect replay", () => {
     await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
 
     expect(freshTrack.enabled).toBe(false);
+  });
+
+  test("skips a stream that was unpublished while its getUserMedia reacquire was pending", async () => {
+    const { mockGetUserMedia } = setupNavigatorMocks();
+    const brtc = new BandwidthRtc();
+    stubSetupPeerConnection(brtc);
+    const addSpy = jest.spyOn(brtc as any, "addStreamToPublishingPeerConnection").mockImplementation(() => {});
+    const offerSpy = jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue(undefined);
+
+    const endedTrack = makeTrack("audio", "ended");
+    const mediaStream = makeLiveStream("stream-1", [endedTrack]);
+    (brtc as any).publishedStreams.set(mediaStream.id, { mediaStream });
+
+    const freshTrack = makeTrack("audio");
+    let resolveGetUserMedia!: () => void;
+    mockGetUserMedia.mockReturnValue(
+      new Promise((resolve) => {
+        resolveGetUserMedia = () => resolve({ getTracks: () => [freshTrack] });
+      }),
+    );
+
+    // isReconnect=true keeps this valid once init() only republishes on a reconnect (#18).
+    const initPromise = (brtc as any).init({ publishSdpOffer: {}, subscribeSdpOffer: {} }, true);
+    // Let reacquireEndedTracks start (and reach its getUserMedia await) before unpublishing
+    // the stream out from under it.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    (brtc as any).publishedStreams.delete(mediaStream.id);
+    resolveGetUserMedia();
+
+    await initPromise;
+
+    // The freshly acquired track is live and would otherwise leak, so it must still be stopped.
+    expect(freshTrack.stop).toHaveBeenCalledTimes(1);
+    expect(addSpy).not.toHaveBeenCalled();
+    expect(offerSpy).not.toHaveBeenCalled();
   });
 
   test("one stream's reacquisition failure does not block another stream's replay", async () => {
