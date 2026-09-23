@@ -102,3 +102,60 @@ test("test emit silent after time threshold", async () => {
   audioLevelDetector.emitCurrentAudioLevel();
   expect(spy).toHaveBeenLastCalledWith(AudioLevel.SILENT);
 });
+
+describe("AudioLevelDetector.stop", () => {
+  function withMockAudioContext(closeImpl: () => Promise<void>) {
+    const disconnect = jest.fn();
+    const close = jest.fn(closeImpl);
+    //@ts-ignore
+    global.AudioContext = class {
+      createMediaStreamSource() {
+        return { connect: () => {}, disconnect };
+      }
+      createAnalyser() {
+        return {};
+      }
+      close() {
+        return close();
+      }
+    };
+    return { disconnect, close };
+  }
+
+  afterEach(() => {
+    //@ts-ignore
+    global.AudioContext = MockAudioContext;
+  });
+
+  test("clears the interval, disconnects the source, and closes the context", () => {
+    const { disconnect, close } = withMockAudioContext(() => Promise.resolve());
+    const clearIntervalSpy = jest.spyOn(global, "clearInterval");
+    const audioLevelDetector = new AudioLevelDetector({ mediaStream: {} as fakeMediaStream });
+    const removeAllListenersSpy = jest.spyOn(audioLevelDetector, "removeAllListeners");
+
+    audioLevelDetector.stop();
+
+    expect(clearIntervalSpy).toHaveBeenCalledWith(mockInterval);
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(removeAllListenersSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("is idempotent: a second call does nothing", () => {
+    const { disconnect, close } = withMockAudioContext(() => Promise.resolve());
+    const audioLevelDetector = new AudioLevelDetector({ mediaStream: {} as fakeMediaStream });
+
+    audioLevelDetector.stop();
+    audioLevelDetector.stop();
+
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not throw when context.close() rejects", () => {
+    withMockAudioContext(() => Promise.reject(new Error("already closed")));
+    const audioLevelDetector = new AudioLevelDetector({ mediaStream: {} as fakeMediaStream });
+
+    expect(() => audioLevelDetector.stop()).not.toThrow();
+  });
+});
