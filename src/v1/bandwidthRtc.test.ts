@@ -697,7 +697,8 @@ describe("bandwidthRtcV1 init reconnect replay", () => {
       }),
     );
 
-    const initPromise = brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+    // isReconnect=true keeps this valid once init() only republishes on a reconnect (#18).
+    const initPromise = (brtc as any).init({ publishSdpOffer: {}, subscribeSdpOffer: {} }, true);
     // Let reacquireEndedTracks start (and reach its getUserMedia await) before unpublishing
     // the stream out from under it.
     await new Promise((resolve) => setTimeout(resolve, 10));
