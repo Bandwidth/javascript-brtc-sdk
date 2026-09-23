@@ -243,28 +243,34 @@ export class BandwidthRtc {
     }
 
     logger.info(`Publishing mediaStream ${mediaStream.id} (${alias})`);
-    this.addStreamToPublishingPeerConnection(mediaStream, codecPreferences);
 
     const publishMetadata: StreamPublishMetadata = {};
     if (alias) {
       publishMetadata.alias = alias;
     }
-    this.publishedStreams.set(mediaStream.id, {
-      mediaStream: mediaStream,
-      metadata: publishMetadata,
-      codecPreferences: codecPreferences,
-      constraints: constraints,
-    });
 
+    let audioLevelDetector: AudioLevelDetector | undefined;
     if (audioLevelChangeHandler) {
-      const audioLevelDetector = new AudioLevelDetector({
+      audioLevelDetector = new AudioLevelDetector({
         mediaStream: mediaStream,
       });
       audioLevelDetector.on("audioLevelChange", audioLevelChangeHandler);
     }
 
-    // Perform SDP negotiation with Bandwidth WebRTC
-    const remoteSdpAnswer = await this.offerPublishSdp();
+    // addStreamToPublishingPeerConnection, the publishedStreams entry, and the negotiation all
+    // have to happen atomically: an unpublish() racing in between would otherwise remove a
+    // transceiver mid-offer, or renegotiate before this stream's track is even attached.
+    const remoteSdpAnswer = await this.publishMutex.runExclusive(async () => {
+      this.addStreamToPublishingPeerConnection(mediaStream, codecPreferences);
+      this.publishedStreams.set(mediaStream.id, {
+        mediaStream: mediaStream,
+        metadata: publishMetadata,
+        codecPreferences: codecPreferences,
+        constraints: constraints,
+        audioLevelDetector: audioLevelDetector,
+      });
+      return this.negotiatePublishSdp();
+    });
     // TODO:
     // const remoteStreamMetadata = remoteSdpAnswer.streamMetadata[mediaStream.id];
 
@@ -290,14 +296,39 @@ export class BandwidthRtc {
           publishedStreams.push(s);
         }
       } else {
-        publishedStreams.push({
-          mediaStream: stream.mediaStream!,
-        });
+        // Look up the stored entry first so its audioLevelDetector gets cleaned up too;
+        // fall back to a synthetic entry for a stream the SDK never tracked.
+        publishedStreams.push(this.publishedStreams.get(stream.mediaStream!.id) ?? { mediaStream: stream.mediaStream! });
       }
     }
 
-    this.cleanupPublishedStreams(...publishedStreams);
-    await this.offerPublishSdp();
+    // An empty list here only means "unpublish everything" when the caller passed zero
+    // arguments. If arguments were given but none resolved to a known stream (e.g. an
+    // unknown id), cleaning up with an empty list would otherwise unpublish everything.
+    if (streams.length > 0 && publishedStreams.length === 0) {
+      logger.warn("unpublish: none of the given streams are currently published", streams);
+      return;
+    }
+
+    if (!this.publishingPeerConnection) {
+      // Nothing to renegotiate with the gateway; just release local resources.
+      this.cleanupPublishedStreams(...publishedStreams);
+      return;
+    }
+
+    await this.publishMutex.runExclusive(async () => {
+      // Stop the local tracks first regardless of what happens next - the user's intent
+      // (stop sending this media) must take effect immediately.
+      this.cleanupPublishedStreams(...publishedStreams);
+      try {
+        // The gateway rejects offers unless the publish peer is "connected"; wait it out
+        // rather than sending an offer doomed to be rejected during a brief ICE blip.
+        await this.waitForPublishConnected();
+        await this.negotiatePublishSdp();
+      } catch (err) {
+        throw new BandwidthRtcError(`Stream(s) were unpublished locally, but renegotiation with the gateway failed: ${err}`);
+      }
+    });
   }
 
   /**
@@ -455,47 +486,53 @@ export class BandwidthRtc {
       throw new BandwidthRtcError("No publishing RTCPeerConnection, cannot offer SDP");
     }
 
-    return await this.publishMutex.runExclusive(async () => {
-      const localSdpOffer = await this.publishingPeerConnection!.createOffer({
-        offerToReceiveVideo: false,
-        offerToReceiveAudio: false,
-        iceRestart: restartIce,
-      });
+    return this.publishMutex.runExclusive(() => this.negotiatePublishSdp(restartIce));
+  }
 
-      // Diagnostic only: if an audio m-line is offered without telephone-event, DTMF
-      // can never negotiate for this session regardless of how long sendDtmf waits.
-      if (localSdpOffer.sdp?.includes("m=audio") && !localSdpOffer.sdp.includes(TELEPHONE_EVENT_MIME_TYPE.split("/")[1])) {
-        logger.warn("Publish SDP offer has an audio track but no telephone-event codec; DTMF will not be able to negotiate for this session");
-      }
-
-      let publishMetadata = {
-        mediaStreams: {},
-        dataChannels: {},
-      };
-      publishMetadata.mediaStreams = Object.fromEntries(new Map([...this.publishedStreams].map(([streamId, stream]) => [streamId, stream.metadata || {}])));
-      publishMetadata.dataChannels = Object.fromEntries(
-        new Map(
-          [...this.publishedDataChannels].map(([label, dataChannel]) => [
-            label,
-            {
-              label: dataChannel.label,
-              streamId: dataChannel.id,
-            },
-          ]),
-        ),
-      );
-      logger.debug("publish metadata", publishMetadata);
-      const remoteSdpAnswer = await this.signaling.offerSdp(PEER_CONNECTION_TYPE_PUBLISH, localSdpOffer.sdp!);
-
-      await this.publishingPeerConnection!.setLocalDescription(localSdpOffer);
-      logger.debug("remoteSdpAnswer", remoteSdpAnswer);
-      await this.publishingPeerConnection!.setRemoteDescription({
-        type: "answer",
-        sdp: remoteSdpAnswer.sdpAnswer,
-      });
-
-      return remoteSdpAnswer;
+  // Does the actual createOffer/setLocalDescription/setRemoteDescription dance. Callers are
+  // responsible for holding publishMutex - this does not take it itself, so a caller that
+  // needs to mutate transceivers (e.g. unpublish's cleanup) can do so under the same lock
+  // as the negotiation, instead of racing it.
+  private async negotiatePublishSdp(restartIce: boolean = false): Promise<SdpAnswer> {
+    const localSdpOffer = await this.publishingPeerConnection!.createOffer({
+      offerToReceiveVideo: false,
+      offerToReceiveAudio: false,
+      iceRestart: restartIce,
     });
+
+    // Diagnostic only: if an audio m-line is offered without telephone-event, DTMF
+    // can never negotiate for this session regardless of how long sendDtmf waits.
+    if (localSdpOffer.sdp?.includes("m=audio") && !localSdpOffer.sdp.includes(TELEPHONE_EVENT_MIME_TYPE.split("/")[1])) {
+      logger.warn("Publish SDP offer has an audio track but no telephone-event codec; DTMF will not be able to negotiate for this session");
+    }
+
+    let publishMetadata = {
+      mediaStreams: {},
+      dataChannels: {},
+    };
+    publishMetadata.mediaStreams = Object.fromEntries(new Map([...this.publishedStreams].map(([streamId, stream]) => [streamId, stream.metadata || {}])));
+    publishMetadata.dataChannels = Object.fromEntries(
+      new Map(
+        [...this.publishedDataChannels].map(([label, dataChannel]) => [
+          label,
+          {
+            label: dataChannel.label,
+            streamId: dataChannel.id,
+          },
+        ]),
+      ),
+    );
+    logger.debug("publish metadata", publishMetadata);
+    const remoteSdpAnswer = await this.signaling.offerSdp(PEER_CONNECTION_TYPE_PUBLISH, localSdpOffer.sdp!);
+
+    await this.publishingPeerConnection!.setLocalDescription(localSdpOffer);
+    logger.debug("remoteSdpAnswer", remoteSdpAnswer);
+    await this.publishingPeerConnection!.setRemoteDescription({
+      type: "answer",
+      sdp: remoteSdpAnswer.sdpAnswer,
+    });
+
+    return remoteSdpAnswer;
   }
 
   private async handleReady(readyMetadata: ReadyMetadata): Promise<void> {
@@ -692,8 +729,20 @@ export class BandwidthRtc {
       const reacquireErrors: unknown[] = [];
       let attachedCount = 0;
       for (const publishedStream of [...this.publishedStreams.values()]) {
+        // An unpublish() can race this loop: it may have already removed the stream (and
+        // stopped its tracks) before we get to it, or while reacquireEndedTracks' getUserMedia
+        // below is pending.
+        if (!this.publishedStreams.has(publishedStream.mediaStream.id)) {
+          continue;
+        }
         try {
           await this.reacquireEndedTracks(publishedStream);
+          if (!this.publishedStreams.has(publishedStream.mediaStream.id)) {
+            // Unpublished while getUserMedia was pending - the freshly acquired tracks are
+            // live and would otherwise leak, but the stream itself must not be re-attached.
+            publishedStream.mediaStream.getTracks().forEach((track) => track.stop());
+            continue;
+          }
           this.addStreamToPublishingPeerConnection(publishedStream.mediaStream, publishedStream.codecPreferences);
           attachedCount++;
         } catch (err) {
@@ -986,7 +1035,9 @@ export class BandwidthRtc {
 
     for (const stream of streams) {
       stream.mediaStream.getTracks().forEach((track) => {
-        this.publishingPeerConnection!.getTransceivers()
+        // No publishing peer connection (e.g. after disconnect()) means nothing to remove
+        // a transceiver from, but the track still needs to be stopped below.
+        (this.publishingPeerConnection?.getTransceivers() ?? [])
           .filter((transceiver) => transceiver.sender.track === track)
           .forEach((transceiver) => {
             this.publishingPeerConnection!.removeTrack(transceiver.sender);
@@ -995,6 +1046,7 @@ export class BandwidthRtc {
         track.stop();
       });
 
+      stream.audioLevelDetector?.stop();
       this.localDtmfSenders.delete(stream.mediaStream.id);
       this.publishedStreams.delete(stream.mediaStream.id);
     }
