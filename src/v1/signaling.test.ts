@@ -136,15 +136,19 @@ describe("Signaling websocket event handlers", () => {
     return ws.on.mock.calls.find((call: any) => call[0] === event)?.[1];
   }
 
-  test("should emit init and set up ping interval on open", async () => {
+  test("should emit init with isReconnect false on the first open, then true on subsequent opens", async () => {
     const emitSpy = jest.spyOn(signaling, "emit");
     const openCallback = getWsCallback("open");
     expect(openCallback).toBeDefined();
 
     await openCallback();
 
-    expect(emitSpy).toHaveBeenCalledWith("init", expect.anything());
+    expect(emitSpy).toHaveBeenCalledWith("init", expect.anything(), false);
     expect((signaling as any).pingInterval).toBeDefined();
+
+    await openCallback();
+
+    expect(emitSpy).toHaveBeenCalledWith("init", expect.anything(), true);
   });
 
   test("should reject with error and disconnect on 403 error", async () => {
