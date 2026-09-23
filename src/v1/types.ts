@@ -19,6 +19,8 @@ export interface SdpAnswer {
 export interface SubscribeSdpOffer {
   sdpOffer: string;
   sdpRevision: number;
+  /** "publish" routes to the publishing connection; absent means subscribe, for older gateways. */
+  peerType?: string;
   /**
    * Per-track stream metadata keyed by track id, sent alongside the offer that
    * adds a call's subscribe track. The SDK derives stream-available from the

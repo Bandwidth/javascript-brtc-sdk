@@ -63,8 +63,8 @@ const CONNECTION_STATE_CLOSED = "closed";
 const PUBLISH_ICE_CONNECT_TIMEOUT_MS = 10_000;
 const PUBLISH_ICE_CONNECT_POLL_INTERVAL_MS = 100;
 
-// When true, automatically trigger an ICE restart (via offerPublishSdp(true)) on connection failure.
-const RETRY_ICE_ON_FAILED = true;
+// The gateway owns ICE restart and rejects client offers until the peer is connected again.
+const RETRY_ICE_ON_FAILED = false;
 
 export class BandwidthRtc {
   private options?: RtcOptions;
@@ -98,6 +98,8 @@ export class BandwidthRtc {
 
   // Current SDP revision for the subscribing peer; used to reject outdated SDP offers
   private subscribingPeerConnectionSdpRevision = 0;
+  // Current SDP revision for the publishing peer's gateway-initiated ICE restarts; same purpose.
+  private publishingPeerConnectionSdpRevision = 0;
 
   private localDtmfSenders: Map<string, RTCDTMFSender> = new Map();
 
@@ -142,7 +144,7 @@ export class BandwidthRtc {
 
     logger.info("Connecting to Bandwidth WebRTC");
     this.signaling.on("ready", this.handleReady.bind(this));
-    this.signaling.on("sdpOffer", this.handleSubscribeSdpOffer.bind(this));
+    this.signaling.on("sdpOffer", this.handleSdpOffer.bind(this));
     this.signaling.on("init", this.init.bind(this));
     this.signaling.on("fatalError", this.handleError.bind(this));
 
@@ -438,6 +440,12 @@ export class BandwidthRtc {
       logger.warn(`ICE restart on the ${peerConnectionType} peer connection requires the gateway to re-offer; client cannot initiate`);
       return;
     }
+    if (pc !== this.publishingPeerConnection) {
+      // init() already replaced the publishing connection (e.g. a reconnect ran while this
+      // failed pc's loop was still active); it would otherwise send ICE-restart offers on the
+      // new, healthy connection instead of the one that actually failed.
+      return;
+    }
 
     const ICE_RESTART_TIMEOUT_MS = 30_000;
     const ICE_RESTART_RETRY_INTERVAL_MS = 5_000;
@@ -457,6 +465,9 @@ export class BandwidthRtc {
       if (Date.now() - startTime >= ICE_RESTART_TIMEOUT_MS) {
         logger.warn("ICE restart timed out");
         break;
+      }
+      if (pc !== this.publishingPeerConnection) {
+        return;
       }
       await new Promise((resolve) => setTimeout(resolve, ICE_RESTART_RETRY_INTERVAL_MS));
       // Don't block on this, we should try multiple times
@@ -516,6 +527,58 @@ export class BandwidthRtc {
   private async handleReady(readyMetadata: ReadyMetadata): Promise<void> {
     if (this.readyHandler) {
       this.readyHandler(readyMetadata);
+    }
+  }
+
+  // Routes a gateway sdpOffer notification by peerType: "publish" is a gateway-initiated ICE
+  // restart on the publishing connection; anything else (including missing peerType, for older
+  // gateways) is the existing subscribe renegotiation.
+  private async handleSdpOffer(offer: SubscribeSdpOffer): Promise<void> {
+    if (offer.peerType === PEER_CONNECTION_TYPE_PUBLISH) {
+      await this.handlePublishSdpOffer(offer);
+    } else {
+      await this.handleSubscribeSdpOffer(offer);
+    }
+  }
+
+  // A gateway-initiated ICE restart on the publishing connection (see handleSdpOffer). Runs
+  // under publishMutex so it can't interleave with the SDK's own offerPublishSdp negotiations.
+  private async handlePublishSdpOffer(offer: SubscribeSdpOffer): Promise<void> {
+    try {
+      await this.publishMutex.runExclusive(async () => {
+        logger.info("Received publish SDP offer", offer);
+        logger.debug("Current publish SDP revision", this.publishingPeerConnectionSdpRevision);
+        if (offer.sdpRevision <= this.publishingPeerConnectionSdpRevision) {
+          logger.debug(
+            `Revision on publish SDP offer (${offer.sdpRevision}) is less than current revision (${this.publishingPeerConnectionSdpRevision}), ignoring`,
+          );
+          return;
+        }
+
+        if (!this.publishingPeerConnection) {
+          throw new BandwidthRtcError("No publishing RTCPeerConnection, cannot handle SDP offer");
+        }
+
+        await this.publishingPeerConnection!.setRemoteDescription({
+          type: "offer",
+          sdp: offer.sdpOffer,
+        });
+
+        let localSdpAnswer = await this.publishingPeerConnection!.createAnswer();
+        if (!localSdpAnswer.sdp) {
+          throw new BandwidthRtcError(`RTCPeerConnection.createAnswer returned ${JSON.stringify(localSdpAnswer)}`);
+        }
+
+        await this.publishingPeerConnection!.setLocalDescription(localSdpAnswer);
+        await this.signaling.answerSdp(localSdpAnswer.sdp, PEER_CONNECTION_TYPE_PUBLISH);
+
+        this.publishingPeerConnectionSdpRevision = offer.sdpRevision;
+        logger.debug(`set current publish SDP revision to ${this.publishingPeerConnectionSdpRevision}`);
+      });
+    } catch (err) {
+      // A failed ICE-restart answer leaves publish media down, unlike a dropped subscribe
+      // renegotiation, so this warrants more than debug-level logging.
+      logger.warn("error in handlePublishSdpOffer", err);
     }
   }
 
@@ -585,6 +648,9 @@ export class BandwidthRtc {
     const publishOnTrackHandler = (event: RTCTrackEvent) => {
       logger.debug("publish ontrack event", event);
     };
+    // Every init() builds a new gateway-side publishing connection whose ICE-restart revision
+    // counter starts at 0, not only on reconnect, so this resets unconditionally.
+    this.publishingPeerConnectionSdpRevision = 0;
     // A reconnect re-runs init() against a fresh offer; the previous peer connection (if any)
     // is already dead on the far end, but nothing local closes it, so it leaks otherwise.
     this.publishingPeerConnection?.close();

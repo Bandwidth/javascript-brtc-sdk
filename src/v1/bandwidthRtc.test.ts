@@ -697,6 +697,8 @@ describe("bandwidthRtcV1 retryIceOnFailed", () => {
   test("re-offers once and stops once the publish connection recovers", async () => {
     const brtc = new BandwidthRtc();
     const pc = makePc("failed");
+    // retryIceOnFailed only acts on the current publishing connection.
+    (brtc as any).publishingPeerConnection = pc;
     jest.spyOn(brtc as any, "offerPublishSdp").mockImplementation(async () => {
       (pc as any).connectionState = "connected";
       return {} as any;
@@ -710,6 +712,7 @@ describe("bandwidthRtcV1 retryIceOnFailed", () => {
   test("retries every 5s until the timeout elapses if still failed", async () => {
     const brtc = new BandwidthRtc();
     const pc = makePc("failed");
+    (brtc as any).publishingPeerConnection = pc;
     jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue({} as any);
 
     const done = (brtc as any).retryIceOnFailed(pc, "publish", true);
@@ -726,6 +729,7 @@ describe("bandwidthRtcV1 retryIceOnFailed", () => {
   test("does not throw when a retry's offerPublishSdp rejects", async () => {
     const brtc = new BandwidthRtc();
     const pc = makePc("failed");
+    (brtc as any).publishingPeerConnection = pc;
     jest.spyOn(brtc as any, "offerPublishSdp").mockRejectedValue(new Error("signaling down"));
 
     const done = (brtc as any).retryIceOnFailed(pc, "publish", true);
@@ -735,6 +739,18 @@ describe("bandwidthRtcV1 retryIceOnFailed", () => {
     }
 
     await expect(done).resolves.not.toThrow();
+  });
+
+  test("sends no offer when pc is no longer the publishing peer connection (e.g. init() replaced it)", async () => {
+    const brtc = new BandwidthRtc();
+    const pc = makePc("failed");
+    // A different object is now the live publishing connection.
+    (brtc as any).publishingPeerConnection = {};
+    const offerPublishSdp = jest.spyOn(brtc as any, "offerPublishSdp");
+
+    await (brtc as any).retryIceOnFailed(pc, "publish", true);
+
+    expect(offerPublishSdp).not.toHaveBeenCalled();
   });
 });
 
@@ -805,6 +821,146 @@ describe("bandwidthRtcV1 init on signaling reconnect", () => {
     const offerPublishSdp = jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue({});
 
     await brtc.init(makePreferencesResponse(), true);
+
+    expect(offerPublishSdp).not.toHaveBeenCalled();
+  });
+
+  test("every init resets the publishing peer's ICE-restart revision, not only a reconnect", async () => {
+    const brtc = new BandwidthRtc();
+    jest.spyOn(brtc as any, "setupPeerConnection").mockResolvedValue({ close: jest.fn() });
+    (brtc as any).publishingPeerConnectionSdpRevision = 3;
+
+    await brtc.init(makePreferencesResponse());
+
+    expect((brtc as any).publishingPeerConnectionSdpRevision).toBe(0);
+  });
+});
+
+describe("bandwidthRtcV1 sdpOffer peerType routing", () => {
+  beforeAll(() => {
+    setupNavigatorMocks();
+    setupMocks();
+  });
+
+  function makePc() {
+    return {
+      setRemoteDescription: jest.fn().mockResolvedValue(undefined),
+      createAnswer: jest.fn().mockResolvedValue({ sdp: "answer-sdp" }),
+      setLocalDescription: jest.fn().mockResolvedValue(undefined),
+    } as any;
+  }
+
+  function withMockedAnswerSdp(brtc: BandwidthRtc) {
+    const answerSdp = jest.fn().mockResolvedValue(undefined);
+    (brtc as any).signaling.answerSdp = answerSdp;
+    return answerSdp;
+  }
+
+  test("publish peerType offer is applied to the publishing connection and answered with answerSdp(sdp, publish); subscribing connection untouched", async () => {
+    const brtc = new BandwidthRtc();
+    const publishPc = makePc();
+    const subscribePc = makePc();
+    (brtc as any).publishingPeerConnection = publishPc;
+    (brtc as any).subscribingPeerConnection = subscribePc;
+    const answerSdp = withMockedAnswerSdp(brtc);
+
+    await (brtc as any).handleSdpOffer({ peerType: "publish", sdpOffer: "offer-sdp", sdpRevision: 1 });
+
+    expect(publishPc.setRemoteDescription).toHaveBeenCalledWith({ type: "offer", sdp: "offer-sdp" });
+    expect(publishPc.setLocalDescription).toHaveBeenCalledWith({ sdp: "answer-sdp" });
+    expect(answerSdp).toHaveBeenCalledWith("answer-sdp", "publish");
+    expect(subscribePc.setRemoteDescription).not.toHaveBeenCalled();
+  });
+
+  test.each([["subscribe"], [undefined]])("peerType %s routes to the subscribing connection (existing behaviour)", async (peerType) => {
+    const brtc = new BandwidthRtc();
+    const publishPc = makePc();
+    const subscribePc = makePc();
+    (brtc as any).publishingPeerConnection = publishPc;
+    (brtc as any).subscribingPeerConnection = subscribePc;
+    const answerSdp = withMockedAnswerSdp(brtc);
+
+    await (brtc as any).handleSdpOffer({ peerType, sdpOffer: "offer-sdp", sdpRevision: 1 });
+
+    expect(subscribePc.setRemoteDescription).toHaveBeenCalledWith({ type: "offer", sdp: "offer-sdp" });
+    expect(answerSdp).toHaveBeenCalledWith("answer-sdp", "subscribe");
+    expect(publishPc.setRemoteDescription).not.toHaveBeenCalled();
+  });
+
+  test("a publish offer with a revision <= the last applied one is ignored", async () => {
+    const brtc = new BandwidthRtc();
+    const publishPc = makePc();
+    (brtc as any).publishingPeerConnection = publishPc;
+    (brtc as any).publishingPeerConnectionSdpRevision = 2;
+    withMockedAnswerSdp(brtc);
+
+    await (brtc as any).handleSdpOffer({ peerType: "publish", sdpOffer: "offer-sdp", sdpRevision: 2 });
+
+    expect(publishPc.setRemoteDescription).not.toHaveBeenCalled();
+  });
+
+  test("init resets the publish revision, so a revision-1 offer is applied again after a second init", async () => {
+    const brtc = new BandwidthRtc();
+    jest.spyOn(brtc as any, "setupPeerConnection").mockResolvedValue({ close: jest.fn() });
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+    // Simulate a restart already applied on the first publishing connection.
+    (brtc as any).publishingPeerConnectionSdpRevision = 1;
+
+    await brtc.init({ publishSdpOffer: {}, subscribeSdpOffer: {} } as any);
+    expect((brtc as any).publishingPeerConnectionSdpRevision).toBe(0);
+
+    const publishPc = makePc();
+    (brtc as any).publishingPeerConnection = publishPc;
+    withMockedAnswerSdp(brtc);
+
+    await (brtc as any).handleSdpOffer({ peerType: "publish", sdpOffer: "offer-sdp", sdpRevision: 1 });
+
+    expect(publishPc.setRemoteDescription).toHaveBeenCalled();
+  });
+
+  test("a publish offer waits for an in-flight publish negotiation holding publishMutex", async () => {
+    const brtc = new BandwidthRtc();
+    const publishPc = makePc();
+    (brtc as any).publishingPeerConnection = publishPc;
+    withMockedAnswerSdp(brtc);
+
+    let releaseMutex: () => void = () => {};
+    const heldMutexTask = new Promise<void>((resolve) => {
+      releaseMutex = resolve;
+    });
+    const mutexPromise = (brtc as any).publishMutex.runExclusive(() => heldMutexTask);
+
+    const offerPromise = (brtc as any).handleSdpOffer({ peerType: "publish", sdpOffer: "offer-sdp", sdpRevision: 1 });
+
+    // Give handleSdpOffer a chance to run; it should still be blocked on the mutex.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(publishPc.setRemoteDescription).not.toHaveBeenCalled();
+
+    releaseMutex();
+    await mutexPromise;
+    await offerPromise;
+
+    expect(publishPc.setRemoteDescription).toHaveBeenCalled();
+  });
+});
+
+describe("bandwidthRtcV1 onconnectionstatechange wiring", () => {
+  beforeAll(() => {
+    setupNavigatorMocks();
+    setupMocks();
+  });
+
+  test("connection 'failed' does not send an offer (retry disabled)", async () => {
+    const brtc = new BandwidthRtc();
+    const fakePc: any = { connectionState: "connected" };
+    jest.spyOn(brtc as any, "createPeerConnection").mockReturnValue(fakePc);
+    const offerPublishSdp = jest.spyOn(brtc as any, "offerPublishSdp").mockResolvedValue({});
+
+    await (brtc as any).setupPeerConnection("publish", () => {});
+    (brtc as any).publishingPeerConnection = fakePc;
+
+    fakePc.connectionState = "failed";
+    await fakePc.onconnectionstatechange({ target: fakePc });
 
     expect(offerPublishSdp).not.toHaveBeenCalled();
   });
