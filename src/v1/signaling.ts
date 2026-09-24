@@ -1,7 +1,7 @@
 const sdkVersion = require("../../package.json").version;
 import { v4 as uuid } from "uuid";
 import { EventEmitter } from "events";
-import { Client as JsonRpcClient } from "rpc-websockets";
+import { RpcClient as JsonRpcClient } from "./rpcClient";
 import logger from "../logging";
 import { EndpointType, HangupResult, OutboundConnectionResult, RtcAuthParams, RtcOptions } from "../types";
 import { PublishSdpAnswer, PublishMetadata, ReadyMetadata, SetMediaPreferencesWebRtcResponse, SdpAnswer } from "./types";
@@ -113,14 +113,20 @@ class Signaling extends EventEmitter {
             this.disconnect();
           });
         }
-        let preferencesResponse = await this.setMediaPreferences();
+        let preferencesResponse;
+        try {
+          preferencesResponse = await this.setMediaPreferences();
+        } catch (err) {
+          logger.error("setMediaPreferences failed", err);
+          return;
+        }
         // logger.debug(`Media preferences set`, preferencesResponse);
         // Setup Peers. isReconnect tells the caller whether existing peer connections/media
         // need to be rebuilt and re-published, rather than created for the first time.
         this.emit("init", preferencesResponse, isReconnect);
 
         this.pingInterval = setInterval(() => {
-          ws.call("ping", {});
+          ws.call("ping", {}).catch((err) => logger.debug("ping failed", err));
         }, 60000);
         logger.debug("Websocket configured");
       });
