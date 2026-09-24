@@ -185,7 +185,7 @@ class Signaling extends EventEmitter {
   private _disconnect(notifyLeave: boolean) {
     logger.debug("Disconnecting websocket");
     if (this.ws) {
-      if (notifyLeave) {
+      if (notifyLeave && this.socketOpen) {
         try {
           this.ws.notify("leave");
         } catch (err) {
@@ -220,11 +220,18 @@ class Signaling extends EventEmitter {
       } catch (err) {
         logger.error("Error disabling auto-reconnect", err);
       }
+      // A reconnect may already be scheduled (e.g. after a 1001), which
+      // setAutoReconnect(false) does not cancel.
+      clearTimeout((this.ws as any).reconnect_timer_id);
       this.ws.removeAllListeners();
-      try {
-        this.ws.close();
-      } catch (err) {
-        logger.error(err);
+      // rpc-websockets drops its socket as soon as the server closes it, so there is
+      // nothing left to close on a server-initiated disconnect.
+      if ((this.ws as any).socket) {
+        try {
+          this.ws.close();
+        } catch (err) {
+          logger.error(err);
+        }
       }
       this.ws = null;
     }
@@ -277,7 +284,16 @@ class Signaling extends EventEmitter {
     }) as Promise<void>;
   }
 
+  // rpc-websockets clears its ready flag synchronously when the socket closes, but only
+  // emits "close" on the next tick, so anything sent from the close handler would fail.
+  private get socketOpen(): boolean {
+    return Boolean((this.ws as any)?.ready);
+  }
+
   private sendDiagnostics(diagnostics: Diagnostics): Promise<void> {
+    if (!this.socketOpen) {
+      return Promise.resolve();
+    }
     logger.debug(`Calling "deviceDiagnostics"`);
     return this.ws?.notify("deviceDiagnostics", diagnostics).catch((err: any) => {
       logger.error("Error sending diagnostics", err);
