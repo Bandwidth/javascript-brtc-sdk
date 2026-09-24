@@ -7,6 +7,9 @@ jest.mock("rpc-websockets", () => {
   return {
     Client: jest.fn().mockImplementation(() => {
       const mockClient = {
+        // An open socket, as rpc-websockets reports it while connected.
+        ready: true,
+        socket: {},
         on: jest.fn((event: string, callback: Function) => {
           // Automatically trigger 'ready' event for successful connections
           if (event === "ready") {
