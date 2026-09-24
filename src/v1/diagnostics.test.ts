@@ -89,4 +89,13 @@ describe("DiagnosticsBatcher", () => {
     expect(logger.removeListener).toHaveBeenCalledWith("log", expect.any(Function));
     clearIntervalSpy.mockRestore();
   });
+
+  test("should remove the same logger listener it registered on shutdown", () => {
+    const diagnostics = new DiagnosticsBatcher();
+    const registered = (logger.on as jest.Mock).mock.calls[0][1];
+
+    diagnostics.shutdown();
+
+    expect(logger.removeListener).toHaveBeenCalledWith("log", registered);
+  });
 });

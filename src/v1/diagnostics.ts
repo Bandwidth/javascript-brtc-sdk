@@ -9,12 +9,14 @@ export type Diagnostics = {
 export class DiagnosticsBatcher extends EventEmitter {
   private logEvents: any[];
   private flushInterval: Timeout;
+  // Kept so shutdown() can remove the exact listener that was registered.
+  private logListener = this.handleLogEvent.bind(this);
 
   constructor(flushIntervalMillis = 300000) {
     super();
     this.logEvents = new Array();
 
-    logger.on("log", this.handleLogEvent.bind(this));
+    logger.on("log", this.logListener);
     this.flushInterval = setInterval(this.flushDiagnostics.bind(this), flushIntervalMillis);
   }
 
@@ -30,7 +32,7 @@ export class DiagnosticsBatcher extends EventEmitter {
   shutdown() {
     this.flushDiagnostics();
     clearInterval(this.flushInterval);
-    logger.removeListener("log", this.handleLogEvent.bind(this));
+    logger.removeListener("log", this.logListener);
   }
 
   private handleLogEvent(level: LogLevel, timestamp: any, ...args: any) {
