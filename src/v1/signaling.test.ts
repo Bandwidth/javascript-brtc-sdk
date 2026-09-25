@@ -1,6 +1,7 @@
 import Signaling from "./signaling";
 import { DiagnosticsBatcher } from "./diagnostics";
 import { EndpointType } from "../types";
+import { RpcTimeoutError } from "./rpcClient";
 
 // Mock rpc-websockets
 jest.mock("rpc-websockets", () => {
@@ -152,6 +153,63 @@ describe("Signaling websocket event handlers", () => {
     await openCallback();
 
     expect(emitSpy).toHaveBeenCalledWith("init", expect.anything(), true);
+  });
+
+  test("should tear down and emit fatalError when setMediaPreferences fails", async () => {
+    const emitSpy = jest.spyOn(signaling, "emit");
+    const ws = (signaling as any).ws;
+    ws.call.mockRejectedValueOnce({ code: -32000, message: "boom" });
+
+    await getWsCallback("open")();
+
+    expect(emitSpy).toHaveBeenCalledWith("fatalError", new Error("setMediaPreferences failed: boom"));
+    expect(emitSpy).not.toHaveBeenCalledWith("init", expect.anything(), expect.anything());
+    expect(ws.setAutoReconnect).toHaveBeenCalledWith(false);
+    expect((signaling as any).ws).toBeNull();
+  });
+
+  // The socket closed mid-call: the close handler decides whether to reconnect.
+  test("should leave setMediaPreferences failures on a closed socket to the close handler", async () => {
+    const emitSpy = jest.spyOn(signaling, "emit");
+    const ws = (signaling as any).ws;
+    ws.call.mockImplementationOnce(() => {
+      ws.ready = false;
+      return Promise.reject(new Error("websocket closed before reply"));
+    });
+
+    await getWsCallback("open")();
+
+    expect(emitSpy).not.toHaveBeenCalledWith("fatalError", expect.anything());
+    expect((signaling as any).ws).toBe(ws);
+  });
+
+  describe("ping", () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    async function ping(result: Promise<unknown>) {
+      await getWsCallback("open")();
+      (signaling as any).ws.call.mockReturnValueOnce(result);
+      await jest.advanceTimersByTimeAsync(60000);
+    }
+
+    test("should tear down and emit fatalError when a ping gets no reply", async () => {
+      const emitSpy = jest.spyOn(signaling, "emit");
+
+      await ping(Promise.reject(new RpcTimeoutError("timeout")));
+
+      expect(emitSpy).toHaveBeenCalledWith("fatalError", new Error("Connection lost: ping timed out"));
+      expect((signaling as any).ws).toBeNull();
+    });
+
+    test("should keep the session when a ping fails for another reason", async () => {
+      const emitSpy = jest.spyOn(signaling, "emit");
+
+      await ping(Promise.reject(new Error("websocket closed before reply")));
+
+      expect(emitSpy).not.toHaveBeenCalledWith("fatalError", expect.anything());
+      expect((signaling as any).ws).not.toBeNull();
+    });
   });
 
   test("should reject with error and disconnect on 403 error", async () => {

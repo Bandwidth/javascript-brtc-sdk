@@ -1,7 +1,7 @@
 const sdkVersion = require("../../package.json").version;
 import { v4 as uuid } from "uuid";
 import { EventEmitter } from "events";
-import { RpcClient as JsonRpcClient } from "./rpcClient";
+import { RpcClient as JsonRpcClient, RpcTimeoutError } from "./rpcClient";
 import logger from "../logging";
 import { EndpointType, HangupResult, OutboundConnectionResult, RtcAuthParams, RtcOptions } from "../types";
 import { PublishSdpAnswer, PublishMetadata, ReadyMetadata, SetMediaPreferencesWebRtcResponse, SdpAnswer } from "./types";
@@ -96,6 +96,16 @@ class Signaling extends EventEmitter {
       logger.debug(`Connected to ${websocketUrl}`);
       this.ws = ws;
 
+      // The session cannot continue on this socket: tear it down and tell the
+      // application. On a reconnect the connect() promise has already settled, so
+      // the event is the only thing that reaches it.
+      const failSession = (error: Error) => {
+        logger.error(error.message);
+        reject(error);
+        this.emit("fatalError", error);
+        this._disconnect(false);
+      };
+
       ws.on("sdpOffer", (event: any) => {
         this.emit("sdpOffer", event);
       });
@@ -116,8 +126,10 @@ class Signaling extends EventEmitter {
         let preferencesResponse;
         try {
           preferencesResponse = await this.setMediaPreferences();
-        } catch (err) {
-          logger.error("setMediaPreferences failed", err);
+        } catch (err: any) {
+          // A close fails this call too, and the close handler owns what happens next.
+          if (this.ws !== ws || !this.socketOpen) return;
+          failSession(new Error(`setMediaPreferences failed: ${err?.message ?? err}`));
           return;
         }
         // logger.debug(`Media preferences set`, preferencesResponse);
@@ -126,7 +138,15 @@ class Signaling extends EventEmitter {
         this.emit("init", preferencesResponse, isReconnect);
 
         this.pingInterval = setInterval(() => {
-          ws.call("ping", {}).catch((err) => logger.debug("ping failed", err));
+          ws.call("ping", {}).catch((err) => {
+            // No reply means the connection is dead even though the socket still
+            // looks open, e.g. a NAT or load balancer silently dropped it.
+            if (err instanceof RpcTimeoutError && this.ws === ws) {
+              failSession(new Error("Connection lost: ping timed out"));
+            } else {
+              logger.debug("ping failed", err);
+            }
+          });
         }, 60000);
         logger.debug("Websocket configured");
       });
