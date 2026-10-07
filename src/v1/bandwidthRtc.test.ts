@@ -1,6 +1,7 @@
 import { BandwidthRtc } from "./bandwidthRtc";
 import { setupMocks, setupNavigatorMocks } from "../mocks";
 import { BandwidthRtcError } from "../types";
+import logger from "../logging";
 
 // Mock Signaling class
 jest.mock("./signaling", () => {
@@ -1218,5 +1219,56 @@ describe("bandwidthRtcV1 getCallStats", () => {
     const snap = await setup(jest.fn().mockRejectedValue(new Error("boom")), jest.fn().mockResolvedValue(pubReport)).getCallStats();
     expect(snap.packetsReceived).toBe(0);
     expect(snap.bytesSent).toBe(4000);
+  });
+});
+
+describe("bandwidthRtcV1 call stats trace", () => {
+  const TRACE_INTERVAL_MS = 5 * 60 * 1000;
+  const pc = () => ({ getStats: jest.fn().mockResolvedValue(new Map()), close: jest.fn() });
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.spyOn(logger, "debug").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  const traceCalls = () => (logger.debug as jest.Mock).mock.calls.filter(([msg]) => msg === "Call stats");
+
+  test("logs a snapshot every 5 minutes after connect", async () => {
+    const brtc = new BandwidthRtc();
+    (brtc as any).publishingPeerConnection = pc();
+    await brtc.connect({ endpointToken: "t" });
+
+    await jest.advanceTimersByTimeAsync(TRACE_INTERVAL_MS - 1);
+    expect(traceCalls()).toHaveLength(0);
+    await jest.advanceTimersByTimeAsync(1);
+    expect(traceCalls()).toHaveLength(1);
+    expect(traceCalls()[0][1]).toMatchObject({ codec: "unknown", rtcpRoundTripTime: 0 });
+    await jest.advanceTimersByTimeAsync(TRACE_INTERVAL_MS);
+    expect(traceCalls()).toHaveLength(2);
+    brtc.disconnect();
+  });
+
+  test("stops tracing after disconnect", async () => {
+    const brtc = new BandwidthRtc();
+    (brtc as any).publishingPeerConnection = pc();
+    await brtc.connect({ endpointToken: "t" });
+    brtc.disconnect();
+
+    await jest.advanceTimersByTimeAsync(TRACE_INTERVAL_MS * 2);
+    expect(traceCalls()).toHaveLength(0);
+  });
+
+  test("skips the trace while no peer connection exists", async () => {
+    const brtc = new BandwidthRtc();
+    await brtc.connect({ endpointToken: "t" });
+
+    await jest.advanceTimersByTimeAsync(TRACE_INTERVAL_MS);
+    expect(traceCalls()).toHaveLength(0);
+    brtc.disconnect();
   });
 });

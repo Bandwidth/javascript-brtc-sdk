@@ -67,11 +67,18 @@ const PUBLISH_ICE_CONNECT_POLL_INTERVAL_MS = 100;
 // The gateway owns ICE restart and rejects client offers until the peer is connected again.
 const RETRY_ICE_ON_FAILED = false;
 
+/** How often the call stats snapshot is written to the debug log while connected. */
+const CALL_STATS_TRACE_INTERVAL_MS = 5 * 60 * 1000;
+
 export class BandwidthRtc {
   private options?: RtcOptions;
 
   private diagnosticsBatcher: DiagnosticsBatcher;
   private signaling: Signaling;
+
+  private callStatsTraceTimer?: ReturnType<typeof setInterval>;
+  // Previous traced snapshot; lets each trace carry bitrates computed over the trace interval
+  private lastTracedCallStats?: CallStatsSnapshot;
 
   // One peer connection for all published (outgoing) streams, one for all subscribed (incoming) streams
   private publishingPeerConnection?: RTCPeerConnection;
@@ -151,6 +158,7 @@ export class BandwidthRtc {
 
     await this.signaling.connect(authParams, options);
     logger.info("Successfully connected");
+    this.startCallStatsTrace();
   }
 
   /**
@@ -503,11 +511,38 @@ export class BandwidthRtc {
     return snapshot;
   }
 
+  private startCallStatsTrace() {
+    this.stopCallStatsTrace();
+    this.callStatsTraceTimer = setInterval(() => this.traceCallStats(), CALL_STATS_TRACE_INTERVAL_MS);
+  }
+
+  private stopCallStatsTrace() {
+    if (this.callStatsTraceTimer) {
+      clearInterval(this.callStatsTraceTimer);
+      this.callStatsTraceTimer = undefined;
+    }
+    this.lastTracedCallStats = undefined;
+  }
+
+  private async traceCallStats() {
+    // Between a teardown and the next reconnect there is nothing to measure
+    if (!this.publishingPeerConnection && !this.subscribingPeerConnection) {
+      return;
+    }
+    try {
+      this.lastTracedCallStats = await this.getCallStats(this.lastTracedCallStats);
+      logger.debug("Call stats", this.lastTracedCallStats);
+    } catch (err) {
+      logger.warn("Call stats trace failed", err);
+    }
+  }
+
   /**
    * Disconnect from the Bandwidth WebRTC platform, and tear down all published streams
    */
   disconnect() {
     logger.info("Disconnecting");
+    this.stopCallStatsTrace();
     this.cleanupPublishedStreams();
     this.publishingPeerConnection?.close();
     this.subscribingPeerConnection?.close();
