@@ -105,3 +105,26 @@ export interface ReadyMetadata {
   territory: string; // TODO enum
   region: string; // TODO enum
 }
+
+/** Call quality snapshot parsed from native WebRTC stats. Times are in seconds, bitrates in bits/s. */
+export interface CallStatsSnapshot {
+  packetsReceived: number;
+  packetsLost: number;
+  bytesReceived: number;
+  jitter: number;
+  audioLevel: number;
+  packetsSent: number;
+  bytesSent: number;
+  roundTripTime: number;
+  codec: string;
+  inboundBitrate: number;
+  outboundBitrate: number;
+  /** Unix time in seconds */
+  timestamp: number;
+  /** RTCP remote-inbound-rtp fractionLost */
+  remoteFractionLost: number;
+  /** RTCP remote-inbound-rtp jitter */
+  remoteJitter: number;
+  /** RTCP remote-inbound-rtp roundTripTime */
+  rtcpRoundTripTime: number;
+}

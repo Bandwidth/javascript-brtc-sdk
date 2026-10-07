@@ -20,6 +20,7 @@ import {
 import { DiagnosticsBatcher } from "./diagnostics";
 import Signaling from "./signaling";
 import {
+  CallStatsSnapshot,
   CodecPreferences,
   ReadyMetadata,
   PublishedStream,
@@ -66,11 +67,18 @@ const PUBLISH_ICE_CONNECT_POLL_INTERVAL_MS = 100;
 // The gateway owns ICE restart and rejects client offers until the peer is connected again.
 const RETRY_ICE_ON_FAILED = false;
 
+/** How often the call stats snapshot is written to the debug log while connected. */
+const CALL_STATS_TRACE_INTERVAL_MS = 5 * 60 * 1000;
+
 export class BandwidthRtc {
   private options?: RtcOptions;
 
   private diagnosticsBatcher: DiagnosticsBatcher;
   private signaling: Signaling;
+
+  private callStatsTraceTimer?: ReturnType<typeof setInterval>;
+  // Previous traced snapshot; lets each trace carry bitrates computed over the trace interval
+  private lastTracedCallStats?: CallStatsSnapshot;
 
   // One peer connection for all published (outgoing) streams, one for all subscribed (incoming) streams
   private publishingPeerConnection?: RTCPeerConnection;
@@ -150,6 +158,7 @@ export class BandwidthRtc {
 
     await this.signaling.connect(authParams, options);
     logger.info("Successfully connected");
+    this.startCallStatsTrace();
   }
 
   /**
@@ -432,10 +441,108 @@ export class BandwidthRtc {
   }
 
   /**
+   * Get a call quality snapshot from the native WebRTC stats, including RTCP data from the remote receiver
+   * @param previousSnapshot optional earlier snapshot, used to compute inbound/outbound bitrate
+   */
+  async getCallStats(previousSnapshot?: CallStatsSnapshot): Promise<CallStatsSnapshot> {
+    const snapshot: CallStatsSnapshot = {
+      packetsReceived: 0,
+      packetsLost: 0,
+      bytesReceived: 0,
+      jitter: 0,
+      audioLevel: 0,
+      packetsSent: 0,
+      bytesSent: 0,
+      roundTripTime: 0,
+      codec: "unknown",
+      inboundBitrate: 0,
+      outboundBitrate: 0,
+      timestamp: 0,
+      remoteFractionLost: 0,
+      remoteJitter: 0,
+      rtcpRoundTripTime: 0,
+    };
+    // Read the peer connections now; they are replaced on reconnect
+    const subPc = this.subscribingPeerConnection;
+    const pubPc = this.publishingPeerConnection;
+    const [subReport, pubReport] = await Promise.all([
+      subPc?.getStats().catch((err) => logger.warn("getCallStats: subscribing getStats failed", err)),
+      pubPc?.getStats().catch((err) => logger.warn("getCallStats: publishing getStats failed", err)),
+    ]);
+
+    let codecId: string | undefined;
+    subReport?.forEach((stat: any) => {
+      if (stat.type === "inbound-rtp" && stat.kind === "audio") {
+        snapshot.packetsReceived = stat.packetsReceived ?? 0;
+        snapshot.packetsLost = stat.packetsLost ?? 0;
+        snapshot.bytesReceived = stat.bytesReceived ?? 0;
+        snapshot.jitter = stat.jitter ?? 0;
+        snapshot.audioLevel = stat.audioLevel ?? 0;
+        codecId = stat.codecId;
+      } else if (stat.type === "candidate-pair" && stat.state === "succeeded") {
+        snapshot.roundTripTime = stat.currentRoundTripTime ?? 0;
+      }
+    });
+    const mimeType = codecId ? subReport?.get(codecId)?.mimeType : undefined;
+    if (mimeType) {
+      snapshot.codec = mimeType.replace(/^audio\//, "");
+    }
+
+    pubReport?.forEach((stat: any) => {
+      if (stat.kind !== "audio") {
+        return;
+      }
+      if (stat.type === "outbound-rtp") {
+        snapshot.packetsSent = stat.packetsSent ?? 0;
+        snapshot.bytesSent = stat.bytesSent ?? 0;
+      } else if (stat.type === "remote-inbound-rtp") {
+        snapshot.remoteFractionLost = stat.fractionLost ?? 0;
+        snapshot.remoteJitter = stat.jitter ?? 0;
+        snapshot.rtcpRoundTripTime = stat.roundTripTime ?? 0;
+      }
+    });
+
+    snapshot.timestamp = Date.now() / 1000;
+    const timeDelta = previousSnapshot ? snapshot.timestamp - previousSnapshot.timestamp : 0;
+    if (previousSnapshot && timeDelta > 0) {
+      snapshot.inboundBitrate = (Math.max(0, snapshot.bytesReceived - previousSnapshot.bytesReceived) * 8) / timeDelta;
+      snapshot.outboundBitrate = (Math.max(0, snapshot.bytesSent - previousSnapshot.bytesSent) * 8) / timeDelta;
+    }
+    return snapshot;
+  }
+
+  private startCallStatsTrace() {
+    this.stopCallStatsTrace();
+    this.callStatsTraceTimer = setInterval(() => this.traceCallStats(), CALL_STATS_TRACE_INTERVAL_MS);
+  }
+
+  private stopCallStatsTrace() {
+    if (this.callStatsTraceTimer) {
+      clearInterval(this.callStatsTraceTimer);
+      this.callStatsTraceTimer = undefined;
+    }
+    this.lastTracedCallStats = undefined;
+  }
+
+  private async traceCallStats() {
+    // Between a teardown and the next reconnect there is nothing to measure
+    if (!this.publishingPeerConnection && !this.subscribingPeerConnection) {
+      return;
+    }
+    try {
+      this.lastTracedCallStats = await this.getCallStats(this.lastTracedCallStats);
+      logger.debug("Call stats", this.lastTracedCallStats);
+    } catch (err) {
+      logger.warn("Call stats trace failed", err);
+    }
+  }
+
+  /**
    * Disconnect from the Bandwidth WebRTC platform, and tear down all published streams
    */
   disconnect() {
     logger.info("Disconnecting");
+    this.stopCallStatsTrace();
     this.cleanupPublishedStreams();
     this.publishingPeerConnection?.close();
     this.subscribingPeerConnection?.close();

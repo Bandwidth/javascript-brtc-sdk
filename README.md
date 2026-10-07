@@ -96,6 +96,12 @@ bandwidthRtc.sendDtmf("313,3211*#");
 bandwidthRtc.sendDtmf("5", undefined, 200, 100); // 200ms tone, 100ms gap
 ```
 
+### getCallStats
+
+- Description: returns a `CallStatsSnapshot` parsed from native WebRTC stats (v1 client). Pass the previous snapshot to get `inboundBitrate`/`outboundBitrate` (bits/s).
+- Fields: `packetsReceived`, `packetsLost`, `bytesReceived`, `jitter`, `audioLevel`, `packetsSent`, `bytesSent`, `roundTripTime`, `codec`, `inboundBitrate`, `outboundBitrate`, `timestamp` (seconds)
+- RTCP data from the remote receiver: `remoteFractionLost`, `remoteJitter`, `rtcpRoundTripTime`
+
 ## Event Listeners
 
 ### onStreamAvailable

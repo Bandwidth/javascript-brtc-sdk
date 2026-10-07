@@ -1,6 +1,7 @@
 import { BandwidthRtc } from "./bandwidthRtc";
 import { setupMocks, setupNavigatorMocks } from "../mocks";
 import { BandwidthRtcError } from "../types";
+import logger from "../logging";
 
 // Mock Signaling class
 jest.mock("./signaling", () => {
@@ -1156,5 +1157,118 @@ describe("bandwidthRtcV1 onconnectionstatechange wiring", () => {
     await fakePc.onconnectionstatechange({ target: fakePc });
 
     expect(offerPublishSdp).not.toHaveBeenCalled();
+  });
+});
+
+describe("bandwidthRtcV1 getCallStats", () => {
+  const report = (entries: any[]) => new Map(entries.map((e) => [e.id, e]));
+  const subReport = report([
+    { id: "in", type: "inbound-rtp", kind: "audio", packetsReceived: 10, packetsLost: 1, bytesReceived: 2000, jitter: 0.01, audioLevel: 0.5, codecId: "c" },
+    { id: "c", type: "codec", mimeType: "audio/opus" },
+    { id: "cp", type: "candidate-pair", state: "succeeded", currentRoundTripTime: 0.05 },
+  ]);
+  const pubReport = report([
+    { id: "out", type: "outbound-rtp", kind: "audio", packetsSent: 20, bytesSent: 4000 },
+    { id: "r", type: "remote-inbound-rtp", kind: "audio", fractionLost: 0.1, jitter: 0.02, roundTripTime: 0.08 },
+  ]);
+  const setup = (sub: any, pub: any) => {
+    const brtc = new BandwidthRtc();
+    (brtc as any).subscribingPeerConnection = sub && { getStats: sub };
+    (brtc as any).publishingPeerConnection = pub && { getStats: pub };
+    return brtc;
+  };
+
+  test("parses both reports including RTCP fields", async () => {
+    const snap = await setup(jest.fn().mockResolvedValue(subReport), jest.fn().mockResolvedValue(pubReport)).getCallStats();
+    expect(snap).toMatchObject({
+      packetsReceived: 10,
+      packetsLost: 1,
+      bytesReceived: 2000,
+      jitter: 0.01,
+      audioLevel: 0.5,
+      roundTripTime: 0.05,
+      codec: "opus",
+      packetsSent: 20,
+      bytesSent: 4000,
+      remoteFractionLost: 0.1,
+      remoteJitter: 0.02,
+      rtcpRoundTripTime: 0.08,
+      inboundBitrate: 0,
+      outboundBitrate: 0,
+    });
+    expect(snap.timestamp).toBeGreaterThan(0);
+  });
+
+  test("computes bitrate from previous snapshot and clamps negative deltas", async () => {
+    const brtc = setup(jest.fn().mockResolvedValue(subReport), jest.fn().mockResolvedValue(pubReport));
+    const now = Date.now() / 1000;
+    const prev: any = { bytesReceived: 1000, bytesSent: 9000, timestamp: now - 2 };
+    const snap = await brtc.getCallStats(prev);
+    expect(snap.inboundBitrate).toBeCloseTo(4000, -2);
+    expect(snap.outboundBitrate).toBe(0);
+  });
+
+  test("returns defaults when peer connections are undefined", async () => {
+    const snap = await setup(undefined, undefined).getCallStats();
+    expect(snap.codec).toBe("unknown");
+    expect(snap.packetsReceived).toBe(0);
+    expect(snap.timestamp).toBeGreaterThan(0);
+  });
+
+  test("keeps defaults for a side whose getStats rejects", async () => {
+    const snap = await setup(jest.fn().mockRejectedValue(new Error("boom")), jest.fn().mockResolvedValue(pubReport)).getCallStats();
+    expect(snap.packetsReceived).toBe(0);
+    expect(snap.bytesSent).toBe(4000);
+  });
+});
+
+describe("bandwidthRtcV1 call stats trace", () => {
+  const TRACE_INTERVAL_MS = 5 * 60 * 1000;
+  const pc = () => ({ getStats: jest.fn().mockResolvedValue(new Map()), close: jest.fn() });
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.spyOn(logger, "debug").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  const traceCalls = () => (logger.debug as jest.Mock).mock.calls.filter(([msg]) => msg === "Call stats");
+
+  test("logs a snapshot every 5 minutes after connect", async () => {
+    const brtc = new BandwidthRtc();
+    (brtc as any).publishingPeerConnection = pc();
+    await brtc.connect({ endpointToken: "t" });
+
+    await jest.advanceTimersByTimeAsync(TRACE_INTERVAL_MS - 1);
+    expect(traceCalls()).toHaveLength(0);
+    await jest.advanceTimersByTimeAsync(1);
+    expect(traceCalls()).toHaveLength(1);
+    expect(traceCalls()[0][1]).toMatchObject({ codec: "unknown", rtcpRoundTripTime: 0 });
+    await jest.advanceTimersByTimeAsync(TRACE_INTERVAL_MS);
+    expect(traceCalls()).toHaveLength(2);
+    brtc.disconnect();
+  });
+
+  test("stops tracing after disconnect", async () => {
+    const brtc = new BandwidthRtc();
+    (brtc as any).publishingPeerConnection = pc();
+    await brtc.connect({ endpointToken: "t" });
+    brtc.disconnect();
+
+    await jest.advanceTimersByTimeAsync(TRACE_INTERVAL_MS * 2);
+    expect(traceCalls()).toHaveLength(0);
+  });
+
+  test("skips the trace while no peer connection exists", async () => {
+    const brtc = new BandwidthRtc();
+    await brtc.connect({ endpointToken: "t" });
+
+    await jest.advanceTimersByTimeAsync(TRACE_INTERVAL_MS);
+    expect(traceCalls()).toHaveLength(0);
+    brtc.disconnect();
   });
 });
