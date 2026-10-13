@@ -284,6 +284,19 @@ describe("Signaling websocket event handlers", () => {
     expect((signaling as any).isReady).toBe(false);
   });
 
+  test("should emit disconnected once on a non-retryable close, not on 1001", async () => {
+    const closeCallback = getWsCallback("close");
+    const onDisconnected = jest.fn();
+    signaling.on("disconnected", onDisconnected);
+
+    closeCallback(1001);
+    expect(onDisconnected).not.toHaveBeenCalled();
+
+    closeCallback(1011);
+    signaling.disconnect();
+    expect(onDisconnected).toHaveBeenCalledTimes(1);
+  });
+
   test("should not disconnect on the retryable close code 1001", async () => {
     const closeCallback = getWsCallback("close");
     expect(closeCallback).toBeDefined();
@@ -373,6 +386,14 @@ describe("Signaling disconnect", () => {
     const signaling = new Signaling();
     // Never connected, ws is null
     expect(() => signaling.disconnect()).not.toThrow();
+  });
+
+  test("should not emit disconnected without an active ws", () => {
+    const signaling = new Signaling();
+    const onDisconnected = jest.fn();
+    signaling.on("disconnected", onDisconnected);
+    signaling.disconnect();
+    expect(onDisconnected).not.toHaveBeenCalled();
   });
 });
 

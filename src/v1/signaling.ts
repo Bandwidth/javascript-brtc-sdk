@@ -210,6 +210,7 @@ class Signaling extends EventEmitter {
 
   private _disconnect(notifyLeave: boolean) {
     logger.debug("Disconnecting websocket");
+    const hadSocket = this.ws !== null;
     if (this.ws) {
       if (notifyLeave && this.socketOpen) {
         try {
@@ -265,6 +266,10 @@ class Signaling extends EventEmitter {
       clearInterval(this.pingInterval);
     }
     this.isReady = false;
+    // Last, so a throwing listener cannot leave the teardown above half done
+    if (hadSocket) {
+      this.emit("disconnected");
+    }
   }
 
   disconnect() {

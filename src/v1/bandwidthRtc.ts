@@ -20,6 +20,7 @@ import {
 import { DiagnosticsBatcher } from "./diagnostics";
 import Signaling from "./signaling";
 import {
+  CallStatsSnapshot,
   CodecPreferences,
   ReadyMetadata,
   PublishedStream,
@@ -66,11 +67,18 @@ const PUBLISH_ICE_CONNECT_POLL_INTERVAL_MS = 100;
 // The gateway owns ICE restart and rejects client offers until the peer is connected again.
 const RETRY_ICE_ON_FAILED = false;
 
+/** How often the call stats snapshot is written to the debug log while connected. */
+const CALL_STATS_TRACE_INTERVAL_MS = 5 * 60 * 1000;
+
 export class BandwidthRtc {
   private options?: RtcOptions;
 
   private diagnosticsBatcher: DiagnosticsBatcher;
   private signaling: Signaling;
+
+  private callStatsTraceTimer?: ReturnType<typeof setInterval>;
+  // Previous traced snapshot; lets each trace carry bitrates computed over the trace interval
+  private lastTracedCallStats?: CallStatsSnapshot;
 
   // One peer connection for all published (outgoing) streams, one for all subscribed (incoming) streams
   private publishingPeerConnection?: RTCPeerConnection;
@@ -127,6 +135,8 @@ export class BandwidthRtc {
 
     this.diagnosticsBatcher = new DiagnosticsBatcher();
     this.signaling = new Signaling(this.diagnosticsBatcher);
+    // Registered once here: connect() re-registers its own handlers on every call
+    this.signaling.on("disconnected", () => this.endCallStatsTrace("signaling disconnected"));
 
     this.setMicEnabled = this.setMicEnabled.bind(this);
     this.setCameraEnabled = this.setCameraEnabled.bind(this);
@@ -148,8 +158,11 @@ export class BandwidthRtc {
     this.signaling.on("init", this.init.bind(this));
     this.signaling.on("fatalError", this.handleError.bind(this));
 
+    // A connect() that replaces a live session ends that call here, before signaling reports it as disconnected
+    this.endCallStatsTrace("connect");
     await this.signaling.connect(authParams, options);
     logger.info("Successfully connected");
+    this.startCallStatsTrace();
   }
 
   /**
@@ -432,10 +445,156 @@ export class BandwidthRtc {
   }
 
   /**
+   * Get a call quality snapshot from the native WebRTC stats, including RTCP data from the remote receiver
+   * @param previousSnapshot optional earlier snapshot, used to compute inbound/outbound bitrate
+   */
+  async getCallStats(previousSnapshot?: CallStatsSnapshot): Promise<CallStatsSnapshot> {
+    return (await this.collectCallStats(previousSnapshot)).snapshot;
+  }
+
+  // complete is false when a getStats call failed, so the zeroed fields are not real measurements
+  private async collectCallStats(previousSnapshot?: CallStatsSnapshot): Promise<{ snapshot: CallStatsSnapshot; complete: boolean }> {
+    let complete = true;
+    const snapshot: CallStatsSnapshot = {
+      packetsReceived: 0,
+      packetsLost: 0,
+      bytesReceived: 0,
+      jitter: 0,
+      audioLevel: 0,
+      packetsSent: 0,
+      bytesSent: 0,
+      roundTripTime: 0,
+      codec: "unknown",
+      inboundBitrate: 0,
+      outboundBitrate: 0,
+      timestamp: 0,
+      remoteFractionLost: 0,
+      remoteJitter: 0,
+      rtcpRoundTripTime: 0,
+    };
+    // Read the peer connections now; they are replaced on reconnect
+    const subPc = this.subscribingPeerConnection;
+    const pubPc = this.publishingPeerConnection;
+    const [subReport, pubReport] = await Promise.all([
+      subPc?.getStats().catch((err) => {
+        complete = false;
+        logger.warn("getCallStats: subscribing getStats failed", err);
+      }),
+      pubPc?.getStats().catch((err) => {
+        complete = false;
+        logger.warn("getCallStats: publishing getStats failed", err);
+      }),
+    ]);
+
+    // With several audio streams (e.g. a conference), counters are summed and quality fields keep the worst/loudest value
+    let codecId: string | undefined;
+    let selectedPairId: string | undefined;
+    let fallbackPair: any;
+    subReport?.forEach((stat: any) => {
+      if (stat.type === "inbound-rtp" && stat.kind === "audio") {
+        snapshot.packetsReceived += stat.packetsReceived ?? 0;
+        snapshot.packetsLost += stat.packetsLost ?? 0;
+        snapshot.bytesReceived += stat.bytesReceived ?? 0;
+        snapshot.jitter = Math.max(snapshot.jitter, stat.jitter ?? 0);
+        snapshot.audioLevel = Math.max(snapshot.audioLevel, stat.audioLevel ?? 0);
+        codecId = codecId ?? stat.codecId;
+      } else if (stat.type === "transport") {
+        selectedPairId = stat.selectedCandidatePairId;
+      } else if (stat.type === "candidate-pair" && (stat.selected || (stat.nominated && stat.state === "succeeded"))) {
+        // Firefox has no transport stat and marks the active pair with the non-standard "selected"
+        fallbackPair = stat;
+      }
+    });
+    const activePair = (selectedPairId && subReport?.get(selectedPairId)) || fallbackPair;
+    snapshot.roundTripTime = activePair?.currentRoundTripTime ?? 0;
+    const mimeType = codecId ? subReport?.get(codecId)?.mimeType : undefined;
+    if (mimeType) {
+      snapshot.codec = mimeType.replace(/^audio\//, "");
+    }
+
+    pubReport?.forEach((stat: any) => {
+      if (stat.kind !== "audio") {
+        return;
+      }
+      if (stat.type === "outbound-rtp") {
+        snapshot.packetsSent += stat.packetsSent ?? 0;
+        snapshot.bytesSent += stat.bytesSent ?? 0;
+      } else if (stat.type === "remote-inbound-rtp") {
+        snapshot.remoteFractionLost = Math.max(snapshot.remoteFractionLost, stat.fractionLost ?? 0);
+        snapshot.remoteJitter = Math.max(snapshot.remoteJitter, stat.jitter ?? 0);
+        snapshot.rtcpRoundTripTime = Math.max(snapshot.rtcpRoundTripTime, stat.roundTripTime ?? 0);
+      }
+    });
+
+    snapshot.timestamp = Date.now() / 1000;
+    const timeDelta = previousSnapshot ? snapshot.timestamp - previousSnapshot.timestamp : 0;
+    if (previousSnapshot && timeDelta > 0) {
+      snapshot.inboundBitrate = (Math.max(0, snapshot.bytesReceived - previousSnapshot.bytesReceived) * 8) / timeDelta;
+      snapshot.outboundBitrate = (Math.max(0, snapshot.bytesSent - previousSnapshot.bytesSent) * 8) / timeDelta;
+    }
+    return { snapshot, complete };
+  }
+
+  private startCallStatsTrace() {
+    // Each connect() starts a fresh trace: no timer or baseline carries over from an earlier call
+    this.stopCallStatsTrace();
+    this.callStatsTraceTimer = setInterval(() => this.tracePeriodicCallStats(), CALL_STATS_TRACE_INTERVAL_MS);
+  }
+
+  private stopCallStatsTrace() {
+    if (this.callStatsTraceTimer) {
+      clearInterval(this.callStatsTraceTimer);
+      this.callStatsTraceTimer = undefined;
+    }
+    this.lastTracedCallStats = undefined;
+  }
+
+  /**
+   * Log one last snapshot and stop the trace. No-op when no trace is running, so the several paths
+   * that end a call can all call it. Must run before the peer connections close: the getStats reads
+   * start synchronously here.
+   */
+  private endCallStatsTrace(reason: string) {
+    if (!this.callStatsTraceTimer) {
+      return;
+    }
+    const baseline = this.lastTracedCallStats;
+    this.stopCallStatsTrace();
+    void this.traceCallStats(`Final call stats (${reason})`, baseline);
+  }
+
+  private async tracePeriodicCallStats() {
+    const timer = this.callStatsTraceTimer;
+    const snapshot = await this.traceCallStats("Call stats", this.lastTracedCallStats);
+    // The trace ended or restarted while the read was in flight: the result belongs to an earlier call
+    if (snapshot && this.callStatsTraceTimer === timer) {
+      this.lastTracedCallStats = snapshot;
+    }
+  }
+
+  /** Logs a snapshot. Returns it only when complete, so a failed read is never used as a bitrate baseline. */
+  private async traceCallStats(label: string, baseline?: CallStatsSnapshot): Promise<CallStatsSnapshot | undefined> {
+    // Between a teardown and the next reconnect there is nothing to measure
+    if (!this.publishingPeerConnection && !this.subscribingPeerConnection) {
+      logger.debug(`${label} skipped: no peer connection`);
+      return undefined;
+    }
+    try {
+      const { snapshot, complete } = await this.collectCallStats(baseline);
+      logger.debug(complete ? label : `${label} (incomplete)`, snapshot);
+      return complete ? snapshot : undefined;
+    } catch (err) {
+      logger.warn(`${label} failed`, err);
+      return undefined;
+    }
+  }
+
+  /**
    * Disconnect from the Bandwidth WebRTC platform, and tear down all published streams
    */
   disconnect() {
     logger.info("Disconnecting");
+    this.endCallStatsTrace("disconnect");
     this.cleanupPublishedStreams();
     this.publishingPeerConnection?.close();
     this.subscribingPeerConnection?.close();

@@ -25,6 +25,7 @@ jest.mock("./v1/bandwidthRtc", () => ({
     getAudioInputs: jest.fn(),
     getAudioOutputs: jest.fn(),
     getMediaDevices: jest.fn(),
+    getCallStats: jest.fn().mockResolvedValue({ codec: "opus" }),
   })),
 }));
 
@@ -163,4 +164,12 @@ test("test publish without connect error", async () => {
   mockGetUserMedia.mockResolvedValue(new MockMediaStream());
 
   await expect(bandwidthRTC.publish({})).resolves.toBeDefined();
+});
+
+test("getCallStats delegates to the v1 client", async () => {
+  const bandwidthRTC = new BandwidthRtc("debug");
+  const previous = { bytesReceived: 1 } as any;
+
+  await expect(bandwidthRTC.getCallStats(previous)).resolves.toEqual({ codec: "opus" });
+  expect((bandwidthRTC as any).delegate.getCallStats).toHaveBeenCalledWith(previous);
 });
