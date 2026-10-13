@@ -158,6 +158,8 @@ export class BandwidthRtc {
     this.signaling.on("init", this.init.bind(this));
     this.signaling.on("fatalError", this.handleError.bind(this));
 
+    // A connect() that replaces a live session ends that call here, before signaling reports it as disconnected
+    this.endCallStatsTrace("connect");
     await this.signaling.connect(authParams, options);
     logger.info("Successfully connected");
     this.startCallStatsTrace();
@@ -484,19 +486,27 @@ export class BandwidthRtc {
       }),
     ]);
 
+    // With several audio streams (e.g. a conference), counters are summed and quality fields keep the worst/loudest value
     let codecId: string | undefined;
+    let selectedPairId: string | undefined;
+    let fallbackPair: any;
     subReport?.forEach((stat: any) => {
       if (stat.type === "inbound-rtp" && stat.kind === "audio") {
-        snapshot.packetsReceived = stat.packetsReceived ?? 0;
-        snapshot.packetsLost = stat.packetsLost ?? 0;
-        snapshot.bytesReceived = stat.bytesReceived ?? 0;
-        snapshot.jitter = stat.jitter ?? 0;
-        snapshot.audioLevel = stat.audioLevel ?? 0;
-        codecId = stat.codecId;
-      } else if (stat.type === "candidate-pair" && stat.state === "succeeded") {
-        snapshot.roundTripTime = stat.currentRoundTripTime ?? 0;
+        snapshot.packetsReceived += stat.packetsReceived ?? 0;
+        snapshot.packetsLost += stat.packetsLost ?? 0;
+        snapshot.bytesReceived += stat.bytesReceived ?? 0;
+        snapshot.jitter = Math.max(snapshot.jitter, stat.jitter ?? 0);
+        snapshot.audioLevel = Math.max(snapshot.audioLevel, stat.audioLevel ?? 0);
+        codecId = codecId ?? stat.codecId;
+      } else if (stat.type === "transport") {
+        selectedPairId = stat.selectedCandidatePairId;
+      } else if (stat.type === "candidate-pair" && (stat.selected || (stat.nominated && stat.state === "succeeded"))) {
+        // Firefox has no transport stat and marks the active pair with the non-standard "selected"
+        fallbackPair = stat;
       }
     });
+    const activePair = (selectedPairId && subReport?.get(selectedPairId)) || fallbackPair;
+    snapshot.roundTripTime = activePair?.currentRoundTripTime ?? 0;
     const mimeType = codecId ? subReport?.get(codecId)?.mimeType : undefined;
     if (mimeType) {
       snapshot.codec = mimeType.replace(/^audio\//, "");
@@ -507,12 +517,12 @@ export class BandwidthRtc {
         return;
       }
       if (stat.type === "outbound-rtp") {
-        snapshot.packetsSent = stat.packetsSent ?? 0;
-        snapshot.bytesSent = stat.bytesSent ?? 0;
+        snapshot.packetsSent += stat.packetsSent ?? 0;
+        snapshot.bytesSent += stat.bytesSent ?? 0;
       } else if (stat.type === "remote-inbound-rtp") {
-        snapshot.remoteFractionLost = stat.fractionLost ?? 0;
-        snapshot.remoteJitter = stat.jitter ?? 0;
-        snapshot.rtcpRoundTripTime = stat.roundTripTime ?? 0;
+        snapshot.remoteFractionLost = Math.max(snapshot.remoteFractionLost, stat.fractionLost ?? 0);
+        snapshot.remoteJitter = Math.max(snapshot.remoteJitter, stat.jitter ?? 0);
+        snapshot.rtcpRoundTripTime = Math.max(snapshot.rtcpRoundTripTime, stat.roundTripTime ?? 0);
       }
     });
 

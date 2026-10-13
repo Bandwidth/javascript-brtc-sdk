@@ -106,7 +106,10 @@ export interface ReadyMetadata {
   region: string; // TODO enum
 }
 
-/** Call quality snapshot parsed from native WebRTC stats. Times are in seconds, bitrates in bits/s. */
+/**
+ * Call quality snapshot parsed from native WebRTC stats. Times are in seconds, bitrates in bits/s.
+ * A field the browser has not reported yet is 0, so 0 does not always mean a perfect value.
+ */
 export interface CallStatsSnapshot {
   packetsReceived: number;
   packetsLost: number;
@@ -121,7 +124,7 @@ export interface CallStatsSnapshot {
   outboundBitrate: number;
   /** Unix time in seconds */
   timestamp: number;
-  /** RTCP remote-inbound-rtp fractionLost */
+  /** RTCP remote-inbound-rtp fractionLost; 0 until the first receiver report arrives */
   remoteFractionLost: number;
   /** RTCP remote-inbound-rtp jitter */
   remoteJitter: number;
