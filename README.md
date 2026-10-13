@@ -98,9 +98,10 @@ bandwidthRtc.sendDtmf("5", undefined, 200, 100); // 200ms tone, 100ms gap
 
 ### getCallStats
 
-- Description: returns a `CallStatsSnapshot` parsed from native WebRTC stats (v1 client). Pass the previous snapshot to get `inboundBitrate`/`outboundBitrate` (bits/s).
+- Description: returns a `CallStatsSnapshot` parsed from native WebRTC stats. Pass the previous snapshot to get `inboundBitrate`/`outboundBitrate` (bits/s).
 - Fields: `packetsReceived`, `packetsLost`, `bytesReceived`, `jitter`, `audioLevel`, `packetsSent`, `bytesSent`, `roundTripTime`, `codec`, `inboundBitrate`, `outboundBitrate`, `timestamp` (seconds)
 - RTCP data from the remote receiver: `remoteFractionLost`, `remoteJitter`, `rtcpRoundTripTime`
+- Debug log: while connected, a snapshot is logged every 5 minutes, and a final one when the call ends (disconnect, fatal error, or the signaling socket closing for good)
 
 ## Event Listeners
 

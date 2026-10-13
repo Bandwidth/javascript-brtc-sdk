@@ -135,6 +135,8 @@ export class BandwidthRtc {
 
     this.diagnosticsBatcher = new DiagnosticsBatcher();
     this.signaling = new Signaling(this.diagnosticsBatcher);
+    // Registered once here: connect() re-registers its own handlers on every call
+    this.signaling.on("disconnected", () => this.endCallStatsTrace("signaling disconnected"));
 
     this.setMicEnabled = this.setMicEnabled.bind(this);
     this.setCameraEnabled = this.setCameraEnabled.bind(this);
@@ -445,6 +447,12 @@ export class BandwidthRtc {
    * @param previousSnapshot optional earlier snapshot, used to compute inbound/outbound bitrate
    */
   async getCallStats(previousSnapshot?: CallStatsSnapshot): Promise<CallStatsSnapshot> {
+    return (await this.collectCallStats(previousSnapshot)).snapshot;
+  }
+
+  // complete is false when a getStats call failed, so the zeroed fields are not real measurements
+  private async collectCallStats(previousSnapshot?: CallStatsSnapshot): Promise<{ snapshot: CallStatsSnapshot; complete: boolean }> {
+    let complete = true;
     const snapshot: CallStatsSnapshot = {
       packetsReceived: 0,
       packetsLost: 0,
@@ -466,8 +474,14 @@ export class BandwidthRtc {
     const subPc = this.subscribingPeerConnection;
     const pubPc = this.publishingPeerConnection;
     const [subReport, pubReport] = await Promise.all([
-      subPc?.getStats().catch((err) => logger.warn("getCallStats: subscribing getStats failed", err)),
-      pubPc?.getStats().catch((err) => logger.warn("getCallStats: publishing getStats failed", err)),
+      subPc?.getStats().catch((err) => {
+        complete = false;
+        logger.warn("getCallStats: subscribing getStats failed", err);
+      }),
+      pubPc?.getStats().catch((err) => {
+        complete = false;
+        logger.warn("getCallStats: publishing getStats failed", err);
+      }),
     ]);
 
     let codecId: string | undefined;
@@ -508,12 +522,13 @@ export class BandwidthRtc {
       snapshot.inboundBitrate = (Math.max(0, snapshot.bytesReceived - previousSnapshot.bytesReceived) * 8) / timeDelta;
       snapshot.outboundBitrate = (Math.max(0, snapshot.bytesSent - previousSnapshot.bytesSent) * 8) / timeDelta;
     }
-    return snapshot;
+    return { snapshot, complete };
   }
 
   private startCallStatsTrace() {
+    // Each connect() starts a fresh trace: no timer or baseline carries over from an earlier call
     this.stopCallStatsTrace();
-    this.callStatsTraceTimer = setInterval(() => this.traceCallStats(), CALL_STATS_TRACE_INTERVAL_MS);
+    this.callStatsTraceTimer = setInterval(() => this.tracePeriodicCallStats(), CALL_STATS_TRACE_INTERVAL_MS);
   }
 
   private stopCallStatsTrace() {
@@ -524,16 +539,43 @@ export class BandwidthRtc {
     this.lastTracedCallStats = undefined;
   }
 
-  private async traceCallStats() {
-    // Between a teardown and the next reconnect there is nothing to measure
-    if (!this.publishingPeerConnection && !this.subscribingPeerConnection) {
+  /**
+   * Log one last snapshot and stop the trace. No-op when no trace is running, so the several paths
+   * that end a call can all call it. Must run before the peer connections close: the getStats reads
+   * start synchronously here.
+   */
+  private endCallStatsTrace(reason: string) {
+    if (!this.callStatsTraceTimer) {
       return;
     }
+    const baseline = this.lastTracedCallStats;
+    this.stopCallStatsTrace();
+    void this.traceCallStats(`Final call stats (${reason})`, baseline);
+  }
+
+  private async tracePeriodicCallStats() {
+    const timer = this.callStatsTraceTimer;
+    const snapshot = await this.traceCallStats("Call stats", this.lastTracedCallStats);
+    // The trace ended or restarted while the read was in flight: the result belongs to an earlier call
+    if (snapshot && this.callStatsTraceTimer === timer) {
+      this.lastTracedCallStats = snapshot;
+    }
+  }
+
+  /** Logs a snapshot. Returns it only when complete, so a failed read is never used as a bitrate baseline. */
+  private async traceCallStats(label: string, baseline?: CallStatsSnapshot): Promise<CallStatsSnapshot | undefined> {
+    // Between a teardown and the next reconnect there is nothing to measure
+    if (!this.publishingPeerConnection && !this.subscribingPeerConnection) {
+      logger.debug(`${label} skipped: no peer connection`);
+      return undefined;
+    }
     try {
-      this.lastTracedCallStats = await this.getCallStats(this.lastTracedCallStats);
-      logger.debug("Call stats", this.lastTracedCallStats);
+      const { snapshot, complete } = await this.collectCallStats(baseline);
+      logger.debug(complete ? label : `${label} (incomplete)`, snapshot);
+      return complete ? snapshot : undefined;
     } catch (err) {
-      logger.warn("Call stats trace failed", err);
+      logger.warn(`${label} failed`, err);
+      return undefined;
     }
   }
 
@@ -542,7 +584,7 @@ export class BandwidthRtc {
    */
   disconnect() {
     logger.info("Disconnecting");
-    this.stopCallStatsTrace();
+    this.endCallStatsTrace("disconnect");
     this.cleanupPublishedStreams();
     this.publishingPeerConnection?.close();
     this.subscribingPeerConnection?.close();

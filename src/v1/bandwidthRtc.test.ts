@@ -1271,4 +1271,90 @@ describe("bandwidthRtcV1 call stats trace", () => {
     expect(traceCalls()).toHaveLength(0);
     brtc.disconnect();
   });
+
+  const finalCalls = () => (logger.debug as jest.Mock).mock.calls.filter(([msg]) => String(msg).startsWith("Final call stats"));
+  const fireSignaling = (brtc: BandwidthRtc, event: string) =>
+    (brtc as any).signaling.on.mock.calls.find(([name]: [string]) => name === event)[1]();
+
+  test("logs a final snapshot on disconnect, read before the peer connection closes", async () => {
+    const brtc = new BandwidthRtc();
+    const publishing = pc();
+    (brtc as any).publishingPeerConnection = publishing;
+    await brtc.connect({ endpointToken: "t" });
+
+    brtc.disconnect();
+    expect(publishing.getStats.mock.invocationCallOrder[0]).toBeLessThan(publishing.close.mock.invocationCallOrder[0]);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(finalCalls()).toHaveLength(1);
+    expect(finalCalls()[0][0]).toBe("Final call stats (disconnect)");
+  });
+
+  test("logs a final snapshot when the signaling socket closes without disconnect()", async () => {
+    const brtc = new BandwidthRtc();
+    (brtc as any).publishingPeerConnection = pc();
+    await brtc.connect({ endpointToken: "t" });
+
+    fireSignaling(brtc, "disconnected");
+    await jest.advanceTimersByTimeAsync(TRACE_INTERVAL_MS * 2);
+    expect(finalCalls()).toHaveLength(1);
+    expect(finalCalls()[0][0]).toBe("Final call stats (signaling disconnected)");
+    expect(traceCalls()).toHaveLength(0);
+  });
+
+  test("logs the final snapshot once when disconnect() is followed by the signaling event", async () => {
+    const brtc = new BandwidthRtc();
+    (brtc as any).publishingPeerConnection = pc();
+    await brtc.connect({ endpointToken: "t" });
+
+    brtc.disconnect();
+    fireSignaling(brtc, "disconnected");
+    await jest.advanceTimersByTimeAsync(0);
+    expect(finalCalls()).toHaveLength(1);
+  });
+
+  test("logs nothing when the call ends before a trace started", async () => {
+    const brtc = new BandwidthRtc();
+    brtc.disconnect();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(finalCalls()).toHaveLength(0);
+  });
+
+  test("reports a failed final read instead of dropping it", async () => {
+    const warn = jest.spyOn(logger, "warn").mockImplementation(() => {});
+    const brtc = new BandwidthRtc();
+    (brtc as any).publishingPeerConnection = { getStats: jest.fn().mockRejectedValue(new Error("closed")), close: jest.fn() };
+    await brtc.connect({ endpointToken: "t" });
+
+    brtc.disconnect();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(warn).toHaveBeenCalledWith("getCallStats: publishing getStats failed", expect.any(Error));
+    expect(finalCalls()[0][0]).toBe("Final call stats (disconnect) (incomplete)");
+  });
+
+  test("does not use a failed read as the next bitrate baseline", async () => {
+    jest.spyOn(logger, "warn").mockImplementation(() => {});
+    const brtc = new BandwidthRtc();
+    const getStats = jest.fn().mockRejectedValueOnce(new Error("boom")).mockResolvedValue(new Map());
+    (brtc as any).publishingPeerConnection = { getStats, close: jest.fn() };
+    await brtc.connect({ endpointToken: "t" });
+
+    await jest.advanceTimersByTimeAsync(TRACE_INTERVAL_MS);
+    expect((brtc as any).lastTracedCallStats).toBeUndefined();
+    await jest.advanceTimersByTimeAsync(TRACE_INTERVAL_MS);
+    expect((brtc as any).lastTracedCallStats).toBeDefined();
+    brtc.disconnect();
+  });
+
+  test("a new connect() starts without the previous call's snapshot", async () => {
+    const brtc = new BandwidthRtc();
+    (brtc as any).publishingPeerConnection = pc();
+    await brtc.connect({ endpointToken: "t" });
+    await jest.advanceTimersByTimeAsync(TRACE_INTERVAL_MS);
+    expect((brtc as any).lastTracedCallStats).toBeDefined();
+
+    brtc.disconnect();
+    await brtc.connect({ endpointToken: "t" });
+    expect((brtc as any).lastTracedCallStats).toBeUndefined();
+    brtc.disconnect();
+  });
 });
