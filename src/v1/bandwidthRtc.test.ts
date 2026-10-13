@@ -1273,8 +1273,7 @@ describe("bandwidthRtcV1 call stats trace", () => {
   });
 
   const finalCalls = () => (logger.debug as jest.Mock).mock.calls.filter(([msg]) => String(msg).startsWith("Final call stats"));
-  const fireSignaling = (brtc: BandwidthRtc, event: string) =>
-    (brtc as any).signaling.on.mock.calls.find(([name]: [string]) => name === event)[1]();
+  const fireSignaling = (brtc: BandwidthRtc, event: string) => (brtc as any).signaling.on.mock.calls.find(([name]: [string]) => name === event)[1]();
 
   test("logs a final snapshot on disconnect, read before the peer connection closes", async () => {
     const brtc = new BandwidthRtc();
