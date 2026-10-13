@@ -127,6 +127,12 @@ export class BandwidthRtc {
 
     this.diagnosticsBatcher = new DiagnosticsBatcher();
     this.signaling = new Signaling(this.diagnosticsBatcher);
+    // Registered once: the Signaling instance outlives connect()/disconnect() cycles, so registering
+    // in connect() would stack another copy of each handler on every reconnect of this instance.
+    this.signaling.on("ready", this.handleReady.bind(this));
+    this.signaling.on("sdpOffer", this.handleSdpOffer.bind(this));
+    this.signaling.on("init", this.init.bind(this));
+    this.signaling.on("fatalError", this.handleError.bind(this));
 
     this.setMicEnabled = this.setMicEnabled.bind(this);
     this.setCameraEnabled = this.setCameraEnabled.bind(this);
@@ -143,11 +149,6 @@ export class BandwidthRtc {
     this.options = options;
 
     logger.info("Connecting to Bandwidth WebRTC");
-    this.signaling.on("ready", this.handleReady.bind(this));
-    this.signaling.on("sdpOffer", this.handleSdpOffer.bind(this));
-    this.signaling.on("init", this.init.bind(this));
-    this.signaling.on("fatalError", this.handleError.bind(this));
-
     await this.signaling.connect(authParams, options);
     logger.info("Successfully connected");
   }
