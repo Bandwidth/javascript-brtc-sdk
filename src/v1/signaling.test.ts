@@ -397,6 +397,107 @@ describe("Signaling disconnect", () => {
   });
 });
 
+describe("Signaling page-exit diagnostics flush", () => {
+  let batcher: DiagnosticsBatcher;
+  let signaling: Signaling;
+  let ws: any;
+  let visibility: string;
+
+  function setVisibility(state: string) {
+    visibility = state;
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
+
+  // Pushes a log line into the batcher so a flush has something to send.
+  function bufferLog(message: string) {
+    (batcher as any).handleLogEvent("info", Date.now(), message);
+  }
+
+  function deviceDiagnosticsCalls() {
+    return ws.notify.mock.calls.filter((call: any) => call[0] === "deviceDiagnostics");
+  }
+
+  beforeEach(async () => {
+    visibility = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+    batcher = new DiagnosticsBatcher();
+    signaling = new Signaling(batcher);
+    await signaling.connect({ endpointToken: "test-token" });
+    ws = (signaling as any).ws;
+    await ws.on.mock.calls.find((call: any) => call[0] === "open")[1]();
+  });
+
+  afterEach(() => {
+    signaling.disconnect();
+    batcher.shutdown();
+    delete (document as any).visibilityState;
+  });
+
+  test("should flush buffered logs on pagehide", () => {
+    bufferLog("before-pagehide");
+
+    window.dispatchEvent(new Event("pagehide"));
+
+    const calls = deviceDiagnosticsCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1].logs.map((log: any) => log.message)).toContainEqual(["before-pagehide"]);
+  });
+
+  test("should flush buffered logs when the page becomes hidden", () => {
+    bufferLog("before-hidden");
+
+    setVisibility("hidden");
+
+    const calls = deviceDiagnosticsCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1].logs.map((log: any) => log.message)).toContainEqual(["before-hidden"]);
+  });
+
+  test("should not flush when the page becomes visible", () => {
+    bufferLog("before-visible");
+
+    setVisibility("visible");
+
+    expect(deviceDiagnosticsCalls()).toHaveLength(0);
+  });
+
+  test("should not register duplicate listeners on repeated opens", async () => {
+    const openCallback = ws.on.mock.calls.find((call: any) => call[0] === "open")[1];
+    await openCallback();
+    await openCallback();
+
+    window.dispatchEvent(new Event("pagehide"));
+
+    expect(deviceDiagnosticsCalls()).toHaveLength(1);
+  });
+
+  test("should stop flushing after disconnect", () => {
+    signaling.disconnect();
+    ws.notify.mockClear();
+
+    window.dispatchEvent(new Event("pagehide"));
+    setVisibility("hidden");
+
+    expect(ws.notify).not.toHaveBeenCalled();
+  });
+
+  test("should keep buffered logs when the socket is not open", () => {
+    bufferLog("while-closed");
+    ws.ready = false;
+
+    window.dispatchEvent(new Event("pagehide"));
+
+    expect(deviceDiagnosticsCalls()).toHaveLength(0);
+
+    ws.ready = true;
+    window.dispatchEvent(new Event("pagehide"));
+
+    const calls = deviceDiagnosticsCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1].logs.map((log: any) => log.message)).toContainEqual(["while-closed"]);
+  });
+});
+
 describe("Signaling test all the smaller functions", () => {
   let signaling: Signaling;
   beforeEach(async () => {
