@@ -103,6 +103,7 @@ bandwidthRtc.sendDtmf("5", undefined, 200, 100); // 200ms tone, 100ms gap
 - RTCP data from the remote receiver: `remoteFractionLost`, `remoteJitter`, `rtcpRoundTripTime`. These are 0 until the first receiver report arrives.
 - With several audio streams, packet and byte counts are summed; jitter, loss, round trip time and audio level show the highest stream
 - Debug log: while connected, a snapshot is logged every 5 minutes, and a final one when the call ends (disconnect, fatal error, or the signaling socket closing for good). While in a call (a subscribe stream is available), a snapshot is also logged every 10 seconds under "In-call stats", with a final one when the call ends. The two traces run independently and may log at the same time
+- Diagnostics logs: buffered logs are sent to the gateway every 5 minutes, and also when the page is hidden or unloaded (best effort, since the browser may close the connection first)
 
 ## Event Listeners
 

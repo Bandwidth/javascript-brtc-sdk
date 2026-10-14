@@ -48,6 +48,7 @@ class Signaling extends EventEmitter {
   private readyMetadata: ReadyMetadata | null = null;
   private diagnosticsBatcher?: DiagnosticsBatcher;
   private rtcOptions?: RtcOptions;
+  private pageExitFlush?: (event: Event) => void;
 
   constructor(diagnosticsBatcher?: DiagnosticsBatcher) {
     super();
@@ -118,6 +119,7 @@ class Signaling extends EventEmitter {
         logger.debug("Websocket open");
         const isReconnect = hasConnectedOnce;
         hasConnectedOnce = true;
+        this.addPageExitFlush();
         if (!isReconnect && globalThis.addEventListener) {
           globalThis.addEventListener("beforeunload", (event) => {
             this.disconnect();
@@ -208,8 +210,48 @@ class Signaling extends EventEmitter {
     }) as Promise<SetMediaPreferencesWebRtcResponse>;
   }
 
+  // Best effort: the browser may close the socket before the bytes leave the page.
+  private addPageExitFlush() {
+    if (this.pageExitFlush || !this.diagnosticsBatcher) {
+      return;
+    }
+    this.pageExitFlush = (event: Event) => {
+      if (event.type === "visibilitychange" && document.visibilityState !== "hidden") {
+        return;
+      }
+      if (!this.diagnosticsBatcher?.hasLogs()) {
+        return;
+      }
+      // A flush clears the buffer, so keep the logs for a later flush while the socket is down
+      if (!this.socketOpen) {
+        return;
+      }
+      this.diagnosticsBatcher?.flushDiagnostics();
+    };
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      window.addEventListener("pagehide", this.pageExitFlush);
+    }
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      document.addEventListener("visibilitychange", this.pageExitFlush);
+    }
+  }
+
+  private removePageExitFlush() {
+    if (!this.pageExitFlush) {
+      return;
+    }
+    if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+      window.removeEventListener("pagehide", this.pageExitFlush);
+    }
+    if (typeof document !== "undefined" && typeof document.removeEventListener === "function") {
+      document.removeEventListener("visibilitychange", this.pageExitFlush);
+    }
+    this.pageExitFlush = undefined;
+  }
+
   private _disconnect(notifyLeave: boolean) {
     logger.debug("Disconnecting websocket");
+    this.removePageExitFlush();
     const hadSocket = this.ws !== null;
     if (this.ws) {
       if (notifyLeave && this.socketOpen) {

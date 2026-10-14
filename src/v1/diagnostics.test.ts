@@ -76,6 +76,17 @@ describe("DiagnosticsBatcher", () => {
     expect(result).toEqual({ logs: [] });
   });
 
+  test("should report whether logs are buffered", () => {
+    const diagnostics = new DiagnosticsBatcher();
+    expect(diagnostics.hasLogs()).toBe(false);
+
+    (diagnostics as any).handleLogEvent("info", Date.now(), "test");
+    expect(diagnostics.hasLogs()).toBe(true);
+
+    diagnostics.flushDiagnostics();
+    expect(diagnostics.hasLogs()).toBe(false);
+  });
+
   test("should flush diagnostics and clear interval on shutdown", () => {
     const clearIntervalSpy = jest.spyOn(global, "clearInterval");
     const diagnostics = new DiagnosticsBatcher();

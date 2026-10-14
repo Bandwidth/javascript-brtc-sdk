@@ -24,6 +24,10 @@ export class DiagnosticsBatcher extends EventEmitter {
     return { logs: this.logEvents };
   }
 
+  hasLogs(): boolean {
+    return this.logEvents.length > 0;
+  }
+
   flushDiagnostics() {
     this.emit("diagnostics", this.getDiagnostics());
     this.logEvents = new Array();
