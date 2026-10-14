@@ -147,7 +147,12 @@ export class BandwidthRtc {
 
     this.diagnosticsBatcher = new DiagnosticsBatcher();
     this.signaling = new Signaling(this.diagnosticsBatcher);
-    // Registered once here: connect() re-registers its own handlers on every call
+    // Registered once: the Signaling instance outlives connect()/disconnect() cycles, so registering
+    // in connect() would stack another copy of each handler on every reconnect of this instance.
+    this.signaling.on("ready", this.handleReady.bind(this));
+    this.signaling.on("sdpOffer", this.handleSdpOffer.bind(this));
+    this.signaling.on("init", this.init.bind(this));
+    this.signaling.on("fatalError", this.handleError.bind(this));
     this.signaling.on("disconnected", () => this.endCallStatsTraces("signaling disconnected"));
 
     this.setMicEnabled = this.setMicEnabled.bind(this);
@@ -165,11 +170,6 @@ export class BandwidthRtc {
     this.options = options;
 
     logger.info("Connecting to Bandwidth WebRTC");
-    this.signaling.on("ready", this.handleReady.bind(this));
-    this.signaling.on("sdpOffer", this.handleSdpOffer.bind(this));
-    this.signaling.on("init", this.init.bind(this));
-    this.signaling.on("fatalError", this.handleError.bind(this));
-
     // A connect() that replaces a live session ends that call here, before signaling reports it as disconnected
     this.endCallStatsTraces("connect");
     await this.signaling.connect(authParams, options);
