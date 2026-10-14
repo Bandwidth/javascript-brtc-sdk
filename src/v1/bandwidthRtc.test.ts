@@ -1416,4 +1416,140 @@ describe("bandwidthRtcV1 call stats trace", () => {
     expect((brtc as any).lastTracedCallStats).toBeUndefined();
     brtc.disconnect();
   });
+
+  describe("in-call trace", () => {
+    const IN_CALL_INTERVAL_MS = 10 * 1000;
+    const inCallCalls = () => (logger.debug as jest.Mock).mock.calls.filter(([msg]) => msg === "In-call stats");
+    const finalInCallCalls = () => (logger.debug as jest.Mock).mock.calls.filter(([msg]) => String(msg).startsWith("Final in-call stats"));
+
+    // Connects and runs init() with a mocked setupPeerConnection, capturing the subscribe ontrack handler
+    const setup = async () => {
+      const brtc = new BandwidthRtc();
+      let onTrack: (event: any) => void = () => {};
+      jest.spyOn(brtc as any, "setupPeerConnection").mockImplementation(async (...args: any[]) => {
+        if (args[0] === "subscribe") {
+          onTrack = args[1];
+        }
+        return pc();
+      });
+      await brtc.connect({ endpointToken: "t" });
+      await brtc.init({ publishSdpOffer: { sdpOffer: "p" }, subscribeSdpOffer: { sdpOffer: "s" } } as any);
+      return { brtc, startCall: (id: string) => startCall(onTrack, id) };
+    };
+
+    const startCall = (onTrack: (event: any) => void, id: string) => {
+      const stream: any = { id };
+      const track = { id: `track-${id}` };
+      onTrack({ track, streams: [stream] });
+      return { end: () => stream.onremovetrack({ track }) };
+    };
+
+    test("does not trace before a call stream is available", async () => {
+      const { brtc } = await setup();
+
+      await jest.advanceTimersByTimeAsync(IN_CALL_INTERVAL_MS * 3);
+      expect(inCallCalls()).toHaveLength(0);
+      expect(finalInCallCalls()).toHaveLength(0);
+      brtc.disconnect();
+    });
+
+    test("logs every 10 seconds while a call stream is active, then a final snapshot when it ends", async () => {
+      const { brtc, startCall } = await setup();
+      const call = startCall("call-1");
+
+      await jest.advanceTimersByTimeAsync(IN_CALL_INTERVAL_MS - 1);
+      expect(inCallCalls()).toHaveLength(0);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(inCallCalls()).toHaveLength(1);
+      await jest.advanceTimersByTimeAsync(IN_CALL_INTERVAL_MS);
+      expect(inCallCalls()).toHaveLength(2);
+
+      call.end();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(finalInCallCalls().map(([msg]) => msg)).toEqual(["Final in-call stats (call ended)"]);
+      await jest.advanceTimersByTimeAsync(IN_CALL_INTERVAL_MS * 3);
+      expect(inCallCalls()).toHaveLength(2);
+      brtc.disconnect();
+    });
+
+    test("keeps tracing until the last of several concurrent call streams ends", async () => {
+      const { brtc, startCall } = await setup();
+      const first = startCall("call-1");
+      const second = startCall("call-2");
+
+      first.end();
+      await jest.advanceTimersByTimeAsync(IN_CALL_INTERVAL_MS);
+      expect(finalInCallCalls()).toHaveLength(0);
+      expect(inCallCalls()).toHaveLength(1);
+
+      second.end();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(finalInCallCalls()).toHaveLength(1);
+      await jest.advanceTimersByTimeAsync(IN_CALL_INTERVAL_MS * 3);
+      expect(inCallCalls()).toHaveLength(1);
+      brtc.disconnect();
+    });
+
+    test("starts a fresh trace for the next call", async () => {
+      const { brtc, startCall } = await setup();
+      startCall("call-1").end();
+      startCall("call-2");
+
+      await jest.advanceTimersByTimeAsync(IN_CALL_INTERVAL_MS);
+      expect(inCallCalls()).toHaveLength(1);
+      brtc.disconnect();
+    });
+
+    test("disconnect during a call logs one final snapshot, read before the peer connection closes", async () => {
+      const { brtc, startCall } = await setup();
+      startCall("call-1");
+      const subscribing = (brtc as any).subscribingPeerConnection;
+
+      brtc.disconnect();
+      expect(subscribing.getStats.mock.invocationCallOrder[0]).toBeLessThan(subscribing.close.mock.invocationCallOrder[0]);
+      fireSignaling(brtc, "disconnected");
+      await jest.advanceTimersByTimeAsync(IN_CALL_INTERVAL_MS * 3);
+      expect(finalInCallCalls().map(([msg]) => msg)).toEqual(["Final in-call stats (disconnect)"]);
+      expect(inCallCalls()).toHaveLength(0);
+      expect((brtc as any).activeCallStreamIds.size).toBe(0);
+    });
+
+    test("a reconnect during a call logs a final snapshot before the old peer connections close", async () => {
+      const { brtc, startCall } = await setup();
+      startCall("call-1");
+      const oldPublishing = (brtc as any).publishingPeerConnection;
+
+      await brtc.init({ publishSdpOffer: { sdpOffer: "p" }, subscribeSdpOffer: { sdpOffer: "s" } } as any, true);
+      expect(oldPublishing.getStats.mock.invocationCallOrder[0]).toBeLessThan(oldPublishing.close.mock.invocationCallOrder[0]);
+      await jest.advanceTimersByTimeAsync(IN_CALL_INTERVAL_MS * 3);
+      expect(finalInCallCalls().map(([msg]) => msg)).toEqual(["Final in-call stats (reconnect)"]);
+      expect(inCallCalls()).toHaveLength(0);
+      expect((brtc as any).activeCallStreamIds.size).toBe(0);
+      brtc.disconnect();
+    });
+
+    test("does not use a failed read as the next bitrate baseline", async () => {
+      jest.spyOn(logger, "warn").mockImplementation(() => {});
+      const { brtc, startCall } = await setup();
+      (brtc as any).publishingPeerConnection.getStats.mockRejectedValueOnce(new Error("boom"));
+      startCall("call-1");
+
+      await jest.advanceTimersByTimeAsync(IN_CALL_INTERVAL_MS);
+      expect((brtc as any).lastInCallTracedStats).toBeUndefined();
+      await jest.advanceTimersByTimeAsync(IN_CALL_INTERVAL_MS);
+      expect((brtc as any).lastInCallTracedStats).toBeDefined();
+      brtc.disconnect();
+    });
+
+    test("the 5-minute trace still fires during a call, independently of the in-call trace", async () => {
+      const { brtc, startCall } = await setup();
+      startCall("call-1");
+
+      await jest.advanceTimersByTimeAsync(TRACE_INTERVAL_MS);
+      expect(traceCalls()).toHaveLength(1);
+      expect(inCallCalls()).toHaveLength(TRACE_INTERVAL_MS / IN_CALL_INTERVAL_MS);
+      expect((brtc as any).lastTracedCallStats).toBeDefined();
+      brtc.disconnect();
+    });
+  });
 });
