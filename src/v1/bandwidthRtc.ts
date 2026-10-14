@@ -70,6 +70,12 @@ const RETRY_ICE_ON_FAILED = false;
 /** How often the call stats snapshot is written to the debug log while connected. */
 const CALL_STATS_TRACE_INTERVAL_MS = 5 * 60 * 1000;
 
+/**
+ * How often the call stats snapshot is written to the debug log while a call stream is active. Runs
+ * independently of the 5-minute trace, so both can log at the same moment.
+ */
+const IN_CALL_STATS_TRACE_INTERVAL_MS = 10 * 1000;
+
 export class BandwidthRtc {
   private options?: RtcOptions;
 
@@ -79,6 +85,12 @@ export class BandwidthRtc {
   private callStatsTraceTimer?: ReturnType<typeof setInterval>;
   // Previous traced snapshot; lets each trace carry bitrates computed over the trace interval
   private lastTracedCallStats?: CallStatsSnapshot;
+
+  // Stream ids of the active calls; the in-call trace runs while this is non-empty
+  private activeCallStreamIds: Set<string> = new Set();
+  private inCallStatsTraceTimer?: ReturnType<typeof setInterval>;
+  // Own baseline, separate from lastTracedCallStats, so each trace's bitrates span its own interval
+  private lastInCallTracedStats?: CallStatsSnapshot;
 
   // One peer connection for all published (outgoing) streams, one for all subscribed (incoming) streams
   private publishingPeerConnection?: RTCPeerConnection;
@@ -136,7 +148,7 @@ export class BandwidthRtc {
     this.diagnosticsBatcher = new DiagnosticsBatcher();
     this.signaling = new Signaling(this.diagnosticsBatcher);
     // Registered once here: connect() re-registers its own handlers on every call
-    this.signaling.on("disconnected", () => this.endCallStatsTrace("signaling disconnected"));
+    this.signaling.on("disconnected", () => this.endCallStatsTraces("signaling disconnected"));
 
     this.setMicEnabled = this.setMicEnabled.bind(this);
     this.setCameraEnabled = this.setCameraEnabled.bind(this);
@@ -159,7 +171,7 @@ export class BandwidthRtc {
     this.signaling.on("fatalError", this.handleError.bind(this));
 
     // A connect() that replaces a live session ends that call here, before signaling reports it as disconnected
-    this.endCallStatsTrace("connect");
+    this.endCallStatsTraces("connect");
     await this.signaling.connect(authParams, options);
     logger.info("Successfully connected");
     this.startCallStatsTrace();
@@ -563,6 +575,45 @@ export class BandwidthRtc {
     void this.traceCallStats(`Final call stats (${reason})`, baseline);
   }
 
+  /** Ends both traces. Must run before the peer connections close, see endCallStatsTrace. */
+  private endCallStatsTraces(reason: string) {
+    this.endCallStatsTrace(reason);
+    this.endInCallStatsTrace(reason);
+  }
+
+  // Only called on the idle to in-call transition, so no timer or baseline is left to reset
+  private startInCallStatsTrace() {
+    this.inCallStatsTraceTimer = setInterval(() => this.traceInCallStats(), IN_CALL_STATS_TRACE_INTERVAL_MS);
+  }
+
+  private stopInCallStatsTrace() {
+    if (this.inCallStatsTraceTimer) {
+      clearInterval(this.inCallStatsTraceTimer);
+      this.inCallStatsTraceTimer = undefined;
+    }
+    this.lastInCallTracedStats = undefined;
+    this.activeCallStreamIds.clear();
+  }
+
+  /** Same contract as endCallStatsTrace, for the in-call trace. Also forgets the active call streams. */
+  private endInCallStatsTrace(reason: string) {
+    if (!this.inCallStatsTraceTimer) {
+      return;
+    }
+    const baseline = this.lastInCallTracedStats;
+    this.stopInCallStatsTrace();
+    void this.traceCallStats(`Final in-call stats (${reason})`, baseline);
+  }
+
+  private async traceInCallStats() {
+    const timer = this.inCallStatsTraceTimer;
+    const snapshot = await this.traceCallStats("In-call stats", this.lastInCallTracedStats);
+    // The trace ended or restarted while the read was in flight: the result belongs to an earlier call
+    if (snapshot && this.inCallStatsTraceTimer === timer) {
+      this.lastInCallTracedStats = snapshot;
+    }
+  }
+
   private async tracePeriodicCallStats() {
     const timer = this.callStatsTraceTimer;
     const snapshot = await this.traceCallStats("Call stats", this.lastTracedCallStats);
@@ -594,7 +645,7 @@ export class BandwidthRtc {
    */
   disconnect() {
     logger.info("Disconnecting");
-    this.endCallStatsTrace("disconnect");
+    this.endCallStatsTraces("disconnect");
     this.cleanupPublishedStreams();
     this.publishingPeerConnection?.close();
     this.subscribingPeerConnection?.close();
@@ -831,6 +882,10 @@ export class BandwidthRtc {
   }
 
   private async doInit(setMediaPreferencesResponse: SetMediaPreferencesWebRtcResponse, isReconnect: boolean = false) {
+    // The subscribing peer connection and streamTracks are rebuilt below, so the old call streams never
+    // fire onremovetrack. End their trace now, while the old peer connections can still be read.
+    this.endInCallStatsTrace("reconnect");
+
     if (isReconnect) {
       // The signaling websocket reconnected (e.g. a gateway-initiated 1001 that expects the
       // same endpoint to keep going, not a fresh connect()). The subscribing side's SDP
@@ -902,6 +957,9 @@ export class BandwidthRtc {
           // unique stream, so clean up its entry as we fire.
           streamTracks.delete(stream);
           logger.debug("onStreamUnavailable", stream.id);
+          if (this.activeCallStreamIds.delete(stream.id) && this.activeCallStreamIds.size === 0) {
+            this.endInCallStatsTrace("call ended");
+          }
           this.streamUnavailableHandler?.({
             mediaTypes: [MediaType.AUDIO],
             mediaStream: stream,
@@ -929,6 +987,11 @@ export class BandwidthRtc {
         this.subscribeTrackMetadata.delete(onlyTrackId);
       }
       logger.debug("onStreamAvailable", stream.id, metadata);
+      const wasIdle = this.activeCallStreamIds.size === 0;
+      this.activeCallStreamIds.add(stream.id);
+      if (wasIdle) {
+        this.startInCallStatsTrace();
+      }
       this.streamAvailableHandler?.({
         mediaTypes: [MediaType.AUDIO],
         mediaStream: stream,
