@@ -106,6 +106,14 @@ export interface ReadyMetadata {
   region: string; // TODO enum
 }
 
+/** Audio RTP counters of one peer connection, summed over its audio streams */
+export interface PeerCallStats {
+  packetsSent: number;
+  bytesSent: number;
+  packetsReceived: number;
+  bytesReceived: number;
+}
+
 /**
  * Call quality snapshot parsed from native WebRTC stats. Times are in seconds, bitrates in bits/s.
  * A field the browser has not reported yet is 0, so 0 does not always mean a perfect value.
@@ -130,4 +138,8 @@ export interface CallStatsSnapshot {
   remoteJitter: number;
   /** RTCP remote-inbound-rtp roundTripTime */
   rtcpRoundTripTime: number;
+  /** Counters of the peer connection that sends local media. Normally only the sent fields are non-zero. */
+  publishPeer: PeerCallStats;
+  /** Counters of the peer connection that receives remote media. Normally only the received fields are non-zero. */
+  subscribePeer: PeerCallStats;
 }

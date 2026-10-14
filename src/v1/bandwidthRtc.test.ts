@@ -1267,6 +1267,74 @@ describe("bandwidthRtcV1 getCallStats", () => {
     expect(snap.packetsReceived).toBe(0);
     expect(snap.bytesSent).toBe(4000);
   });
+
+  describe("per-peer counters", () => {
+    const zeros = { packetsSent: 0, bytesSent: 0, packetsReceived: 0, bytesReceived: 0 };
+
+    test("each peer takes its counters only from its own report", async () => {
+      const sub = report([
+        { id: "in", type: "inbound-rtp", kind: "audio", packetsReceived: 10, bytesReceived: 2000 },
+        { id: "out", type: "outbound-rtp", kind: "audio", packetsSent: 3, bytesSent: 300 },
+      ]);
+      const pub = report([
+        { id: "out", type: "outbound-rtp", kind: "audio", packetsSent: 20, bytesSent: 4000 },
+        { id: "in", type: "inbound-rtp", kind: "audio", packetsReceived: 7, bytesReceived: 700 },
+      ]);
+      const snap = await setup(jest.fn().mockResolvedValue(sub), jest.fn().mockResolvedValue(pub)).getCallStats();
+      expect(snap.publishPeer).toEqual({ packetsSent: 20, bytesSent: 4000, packetsReceived: 7, bytesReceived: 700 });
+      expect(snap.subscribePeer).toEqual({ packetsSent: 3, bytesSent: 300, packetsReceived: 10, bytesReceived: 2000 });
+    });
+
+    test("flat fields ignore the unexpected direction of each peer", async () => {
+      const sub = report([
+        { id: "in", type: "inbound-rtp", kind: "audio", packetsReceived: 10, bytesReceived: 2000 },
+        { id: "out", type: "outbound-rtp", kind: "audio", packetsSent: 3, bytesSent: 300 },
+      ]);
+      const pub = report([
+        { id: "out", type: "outbound-rtp", kind: "audio", packetsSent: 20, bytesSent: 4000 },
+        { id: "in", type: "inbound-rtp", kind: "audio", packetsReceived: 7, bytesReceived: 700 },
+      ]);
+      const snap = await setup(jest.fn().mockResolvedValue(sub), jest.fn().mockResolvedValue(pub)).getCallStats();
+      expect(snap).toMatchObject({ packetsReceived: 10, bytesReceived: 2000, packetsSent: 20, bytesSent: 4000 });
+    });
+
+    test("sums counters across audio streams of a peer", async () => {
+      const pub = report([
+        { id: "out1", type: "outbound-rtp", kind: "audio", packetsSent: 20, bytesSent: 4000 },
+        { id: "out2", type: "outbound-rtp", kind: "audio", packetsSent: 7, bytesSent: 900 },
+      ]);
+      const sub = report([
+        { id: "in1", type: "inbound-rtp", kind: "audio", packetsReceived: 10, bytesReceived: 2000 },
+        { id: "in2", type: "inbound-rtp", kind: "audio", packetsReceived: 5, bytesReceived: 1000 },
+      ]);
+      const snap = await setup(jest.fn().mockResolvedValue(sub), jest.fn().mockResolvedValue(pub)).getCallStats();
+      expect(snap.publishPeer).toEqual({ ...zeros, packetsSent: 27, bytesSent: 4900 });
+      expect(snap.subscribePeer).toEqual({ ...zeros, packetsReceived: 15, bytesReceived: 3000 });
+    });
+
+    test("ignores non-audio stats", async () => {
+      const sub = report([
+        { id: "vin", type: "inbound-rtp", kind: "video", packetsReceived: 10, bytesReceived: 2000 },
+        { id: "vout", type: "outbound-rtp", kind: "video", packetsSent: 3, bytesSent: 300 },
+      ]);
+      const pub = report([
+        { id: "vout", type: "outbound-rtp", kind: "video", packetsSent: 20, bytesSent: 4000 },
+        { id: "vin", type: "inbound-rtp", kind: "video", packetsReceived: 7, bytesReceived: 700 },
+      ]);
+      const snap = await setup(jest.fn().mockResolvedValue(sub), jest.fn().mockResolvedValue(pub)).getCallStats();
+      expect(snap.publishPeer).toEqual(zeros);
+      expect(snap.subscribePeer).toEqual(zeros);
+    });
+
+    test("a missing peer connection gives zeros for that peer", async () => {
+      const snap = await setup(jest.fn().mockResolvedValue(subReport), undefined).getCallStats();
+      expect(snap.publishPeer).toEqual(zeros);
+      expect(snap.subscribePeer).toEqual({ ...zeros, packetsReceived: 10, bytesReceived: 2000 });
+      const none = await setup(undefined, undefined).getCallStats();
+      expect(none.publishPeer).toEqual(zeros);
+      expect(none.subscribePeer).toEqual(zeros);
+    });
+  });
 });
 
 describe("bandwidthRtcV1 call stats trace", () => {
