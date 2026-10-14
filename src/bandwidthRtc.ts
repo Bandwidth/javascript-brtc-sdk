@@ -17,7 +17,7 @@ import {
 import logger, { LogLevel } from "./logging";
 
 import { BandwidthRtc as BandwidthRtcV1 } from "./v1/bandwidthRtc";
-import { CodecPreferences, ReadyMetadata } from "./v1/types";
+import { CallStatsSnapshot, CodecPreferences, ReadyMetadata } from "./v1/types";
 
 class BandwidthRtc {
   // Event handlers
@@ -249,6 +249,17 @@ class BandwidthRtc {
 
     // @ts-ignore
     return this.delegate.setMicEnabled(enabled, stream);
+  }
+
+  /**
+   * Get a call quality snapshot from the native WebRTC stats, including RTCP data from the remote receiver
+   * @param previousSnapshot optional earlier snapshot, used to compute inbound/outbound bitrate
+   */
+  getCallStats(previousSnapshot?: CallStatsSnapshot): Promise<CallStatsSnapshot> {
+    if (!this.delegate) {
+      throw new BandwidthRtcError("You must call 'connect' before 'getCallStats'");
+    }
+    return this.delegate.getCallStats(previousSnapshot);
   }
 
   /**
