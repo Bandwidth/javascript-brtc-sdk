@@ -487,6 +487,8 @@ export class BandwidthRtc {
       remoteFractionLost: 0,
       remoteJitter: 0,
       rtcpRoundTripTime: 0,
+      publishPeer: { packetsSent: 0, bytesSent: 0, packetsReceived: 0, bytesReceived: 0 },
+      subscribePeer: { packetsSent: 0, bytesSent: 0, packetsReceived: 0, bytesReceived: 0 },
     };
     // Read the peer connections now; they are replaced on reconnect
     const subPc = this.subscribingPeerConnection;
@@ -511,9 +513,14 @@ export class BandwidthRtc {
         snapshot.packetsReceived += stat.packetsReceived ?? 0;
         snapshot.packetsLost += stat.packetsLost ?? 0;
         snapshot.bytesReceived += stat.bytesReceived ?? 0;
+        snapshot.subscribePeer.packetsReceived += stat.packetsReceived ?? 0;
+        snapshot.subscribePeer.bytesReceived += stat.bytesReceived ?? 0;
         snapshot.jitter = Math.max(snapshot.jitter, stat.jitter ?? 0);
         snapshot.audioLevel = Math.max(snapshot.audioLevel, stat.audioLevel ?? 0);
         codecId = codecId ?? stat.codecId;
+      } else if (stat.type === "outbound-rtp" && stat.kind === "audio") {
+        snapshot.subscribePeer.packetsSent += stat.packetsSent ?? 0;
+        snapshot.subscribePeer.bytesSent += stat.bytesSent ?? 0;
       } else if (stat.type === "transport") {
         selectedPairId = stat.selectedCandidatePairId;
       } else if (stat.type === "candidate-pair" && (stat.selected || (stat.nominated && stat.state === "succeeded"))) {
@@ -535,6 +542,11 @@ export class BandwidthRtc {
       if (stat.type === "outbound-rtp") {
         snapshot.packetsSent += stat.packetsSent ?? 0;
         snapshot.bytesSent += stat.bytesSent ?? 0;
+        snapshot.publishPeer.packetsSent += stat.packetsSent ?? 0;
+        snapshot.publishPeer.bytesSent += stat.bytesSent ?? 0;
+      } else if (stat.type === "inbound-rtp") {
+        snapshot.publishPeer.packetsReceived += stat.packetsReceived ?? 0;
+        snapshot.publishPeer.bytesReceived += stat.bytesReceived ?? 0;
       } else if (stat.type === "remote-inbound-rtp") {
         snapshot.remoteFractionLost = Math.max(snapshot.remoteFractionLost, stat.fractionLost ?? 0);
         snapshot.remoteJitter = Math.max(snapshot.remoteJitter, stat.jitter ?? 0);
