@@ -473,12 +473,29 @@ describe("Signaling page-exit diagnostics flush", () => {
 
   test("should stop flushing after disconnect", () => {
     signaling.disconnect();
+    // The handler checks hasLogs() first, so a spy on it proves the listener is gone
+    const hasLogsSpy = jest.spyOn(batcher, "hasLogs");
+    const flushSpy = jest.spyOn(batcher, "flushDiagnostics");
+    bufferLog("after-disconnect");
     ws.notify.mockClear();
 
     window.dispatchEvent(new Event("pagehide"));
     setVisibility("hidden");
 
+    expect(hasLogsSpy).not.toHaveBeenCalled();
+    expect(flushSpy).not.toHaveBeenCalled();
     expect(ws.notify).not.toHaveBeenCalled();
+  });
+
+  test("should not send diagnostics when the buffer is empty", () => {
+    // The batcher captures every SDK log line, so drain it first
+    batcher.flushDiagnostics();
+    ws.notify.mockClear();
+
+    window.dispatchEvent(new Event("pagehide"));
+    setVisibility("hidden");
+
+    expect(deviceDiagnosticsCalls()).toHaveLength(0);
   });
 
   test("should keep buffered logs when the socket is not open", () => {

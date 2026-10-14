@@ -219,16 +219,19 @@ class Signaling extends EventEmitter {
       if (event.type === "visibilitychange" && document.visibilityState !== "hidden") {
         return;
       }
+      if (!this.diagnosticsBatcher?.hasLogs()) {
+        return;
+      }
       // A flush clears the buffer, so keep the logs for a later flush while the socket is down
       if (!this.socketOpen) {
         return;
       }
       this.diagnosticsBatcher?.flushDiagnostics();
     };
-    if (typeof window !== "undefined") {
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
       window.addEventListener("pagehide", this.pageExitFlush);
     }
-    if (typeof document !== "undefined") {
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
       document.addEventListener("visibilitychange", this.pageExitFlush);
     }
   }
@@ -237,10 +240,10 @@ class Signaling extends EventEmitter {
     if (!this.pageExitFlush) {
       return;
     }
-    if (typeof window !== "undefined") {
+    if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
       window.removeEventListener("pagehide", this.pageExitFlush);
     }
-    if (typeof document !== "undefined") {
+    if (typeof document !== "undefined" && typeof document.removeEventListener === "function") {
       document.removeEventListener("visibilitychange", this.pageExitFlush);
     }
     this.pageExitFlush = undefined;
