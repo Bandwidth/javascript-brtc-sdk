@@ -75,6 +75,8 @@ const CALL_STATS_TRACE_INTERVAL_MS = 5 * 60 * 1000;
  * independently of the 5-minute trace, so both can log at the same moment.
  */
 const IN_CALL_STATS_TRACE_INTERVAL_MS = 10 * 1000;
+// Final in-call trace reason when the last call stream ends; the only one that uses the pre-renegotiation snapshot
+const CALL_ENDED_REASON = "call ended";
 
 export class BandwidthRtc {
   private options?: RtcOptions;
@@ -91,6 +93,8 @@ export class BandwidthRtc {
   private inCallStatsTraceTimer?: ReturnType<typeof setInterval>;
   // Own baseline, separate from lastTracedCallStats, so each trace's bitrates span its own interval
   private lastInCallTracedStats?: CallStatsSnapshot;
+  // Read just before a subscribe re-offer is applied: the offer that ends a call removes the track's inbound stats
+  private preRenegotiationCallStats?: CallStatsSnapshot;
 
   // One peer connection for all published (outgoing) streams, one for all subscribed (incoming) streams
   private publishingPeerConnection?: RTCPeerConnection;
@@ -592,6 +596,7 @@ export class BandwidthRtc {
       this.inCallStatsTraceTimer = undefined;
     }
     this.lastInCallTracedStats = undefined;
+    this.preRenegotiationCallStats = undefined;
     this.activeCallStreamIds.clear();
   }
 
@@ -601,8 +606,33 @@ export class BandwidthRtc {
       return;
     }
     const baseline = this.lastInCallTracedStats;
+    const preRenegotiation = this.preRenegotiationCallStats;
     this.stopInCallStatsTrace();
-    void this.traceCallStats(`Final in-call stats (${reason})`, baseline);
+    const label = `Final in-call stats (${reason})`;
+    // A fresh read would miss the ended call's inbound stats, so log the one taken before the re-offer
+    if (reason === CALL_ENDED_REASON && preRenegotiation) {
+      logger.debug(label, preRenegotiation);
+      return;
+    }
+    void this.traceCallStats(label, baseline);
+  }
+
+  // Runs under subscribeMutex, before setRemoteDescription. Always clears the stash first so a failed read never leaves an older one.
+  private async stashPreRenegotiationCallStats() {
+    this.preRenegotiationCallStats = undefined;
+    const timer = this.inCallStatsTraceTimer;
+    if (!timer) {
+      return;
+    }
+    try {
+      const { snapshot, complete } = await this.collectCallStats(this.lastInCallTracedStats);
+      // The trace ended or restarted while the read was in flight: the result belongs to an earlier call
+      if (complete && this.inCallStatsTraceTimer === timer) {
+        this.preRenegotiationCallStats = snapshot;
+      }
+    } catch (err) {
+      logger.warn("Pre-renegotiation call stats failed", err);
+    }
   }
 
   private async traceInCallStats() {
@@ -855,6 +885,8 @@ export class BandwidthRtc {
           this.subscribeTrackMetadata.set(trackId, metadata);
         }
 
+        await this.stashPreRenegotiationCallStats();
+
         await this.subscribingPeerConnection!.setRemoteDescription({
           type: "offer",
           sdp: remoteSdpOffer,
@@ -958,7 +990,7 @@ export class BandwidthRtc {
           streamTracks.delete(stream);
           logger.debug("onStreamUnavailable", stream.id);
           if (this.activeCallStreamIds.delete(stream.id) && this.activeCallStreamIds.size === 0) {
-            this.endInCallStatsTrace("call ended");
+            this.endInCallStatsTrace(CALL_ENDED_REASON);
           }
           this.streamUnavailableHandler?.({
             mediaTypes: [MediaType.AUDIO],

@@ -1528,6 +1528,112 @@ describe("bandwidthRtcV1 call stats trace", () => {
       brtc.disconnect();
     });
 
+    describe("final snapshot across a subscribe re-offer", () => {
+      const inboundReport = new Map<string, any>([
+        ["in", { id: "in", type: "inbound-rtp", kind: "audio", packetsReceived: 500, bytesReceived: 80000, jitter: 0.02, codecId: "c" }],
+        ["c", { id: "c", type: "codec", mimeType: "audio/opus" }],
+      ]);
+      let revision = 0;
+
+      // Swaps in a subscribing connection whose inbound stats vanish once setRemoteDescription runs, as when the gateway removes the call's track
+      const setupReOffer = async () => {
+        const { brtc, startCall } = await setup();
+        const pcMock: any = {
+          getStats: jest.fn().mockResolvedValue(inboundReport),
+          close: jest.fn(),
+          createAnswer: jest.fn().mockResolvedValue({ sdp: "answer-sdp" }),
+          setLocalDescription: jest.fn().mockResolvedValue(undefined),
+          setRemoteDescription: jest.fn().mockImplementation(async () => {
+            pcMock.getStats.mockResolvedValue(new Map());
+            pcMock.onSetRemoteDescription?.();
+          }),
+        };
+        (brtc as any).subscribingPeerConnection = pcMock;
+        (brtc as any).signaling.answerSdp = jest.fn().mockResolvedValue(undefined);
+        const reOffer = () => (brtc as any).handleSdpOffer({ peerType: "subscribe", sdpOffer: "offer", sdpRevision: ++revision });
+        return { brtc, startCall, pcMock, reOffer };
+      };
+
+      beforeEach(() => {
+        revision = 0;
+      });
+
+      test("logs the snapshot read before the re-offer, which carries the call's inbound counters", async () => {
+        const { brtc, startCall, pcMock, reOffer } = await setupReOffer();
+        const call = startCall("call-1");
+        pcMock.onSetRemoteDescription = () => call.end();
+
+        await reOffer();
+
+        expect(finalInCallCalls()).toHaveLength(1);
+        expect(finalInCallCalls()[0][0]).toBe("Final in-call stats (call ended)");
+        expect(finalInCallCalls()[0][1]).toMatchObject({ packetsReceived: 500, bytesReceived: 80000, jitter: 0.02, codec: "opus" });
+        expect(pcMock.getStats.mock.invocationCallOrder[0]).toBeLessThan(pcMock.setRemoteDescription.mock.invocationCallOrder[0]);
+        expect((brtc as any).preRenegotiationCallStats).toBeUndefined();
+        brtc.disconnect();
+      });
+
+      test("falls back to a fresh read when the pre-offer read was incomplete", async () => {
+        jest.spyOn(logger, "warn").mockImplementation(() => {});
+        const { brtc, startCall, pcMock, reOffer } = await setupReOffer();
+        const call = startCall("call-1");
+        pcMock.onSetRemoteDescription = () => call.end();
+        pcMock.getStats.mockRejectedValueOnce(new Error("boom"));
+
+        await reOffer();
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect(finalInCallCalls()).toHaveLength(1);
+        expect(finalInCallCalls()[0][1]).toMatchObject({ packetsReceived: 0, codec: "unknown" });
+        brtc.disconnect();
+      });
+
+      test("does not read stats on a subscribe offer when no in-call trace is running", async () => {
+        const { brtc, pcMock, reOffer } = await setupReOffer();
+
+        await reOffer();
+
+        expect(pcMock.getStats).not.toHaveBeenCalled();
+        expect(pcMock.setRemoteDescription).toHaveBeenCalledTimes(1);
+        expect((brtc as any).preRenegotiationCallStats).toBeUndefined();
+        brtc.disconnect();
+      });
+
+      test("a stash from one call is not used by a later call", async () => {
+        const { brtc, startCall, pcMock, reOffer } = await setupReOffer();
+        const first = startCall("call-1");
+        // The offer is applied but the call keeps going, so the stash is left behind
+        await reOffer();
+        expect((brtc as any).preRenegotiationCallStats).toMatchObject({ packetsReceived: 500 });
+
+        first.end();
+        await jest.advanceTimersByTimeAsync(0);
+        (logger.debug as jest.Mock).mockClear();
+
+        startCall("call-2");
+        expect((brtc as any).preRenegotiationCallStats).toBeUndefined();
+        brtc.disconnect();
+        await jest.advanceTimersByTimeAsync(0);
+        expect(finalInCallCalls().map(([msg]) => msg)).toEqual(["Final in-call stats (disconnect)"]);
+        expect(pcMock.getStats).toHaveBeenCalled();
+      });
+
+      test("disconnect during a call still does a fresh final read despite a stashed snapshot", async () => {
+        const { brtc, startCall, pcMock, reOffer } = await setupReOffer();
+        startCall("call-1");
+        await reOffer();
+        expect((brtc as any).preRenegotiationCallStats).toBeDefined();
+        pcMock.getStats.mockClear();
+
+        brtc.disconnect();
+        await jest.advanceTimersByTimeAsync(0);
+
+        // The 5-minute trace also reads on disconnect, so only the logged value shows the in-call read was fresh
+        expect(finalInCallCalls().map(([msg]) => msg)).toEqual(["Final in-call stats (disconnect)"]);
+        expect(finalInCallCalls()[0][1]).toMatchObject({ packetsReceived: 0 });
+      });
+    });
+
     test("does not use a failed read as the next bitrate baseline", async () => {
       jest.spyOn(logger, "warn").mockImplementation(() => {});
       const { brtc, startCall } = await setup();
